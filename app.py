@@ -665,11 +665,11 @@ def get_clients():
 # 메인 헤더
 # ─────────────────────────────────────────────
 
-st.markdown(f"""
-<div style="background:{_header_gr};border-radius:20px;padding:36px 40px;margin-bottom:28px;box-shadow:{_shadow};">
-    <div style="color:white;-webkit-text-fill-color:white;font-size:2rem;font-weight:800;margin:0;line-height:1.2;">
+st.markdown("""
+<div style="background:linear-gradient(135deg,#111111,#1e1e1e,#2a2a2a);border-radius:20px;padding:36px 40px;margin-bottom:28px;box-shadow:0 4px 24px rgba(0,0,0,.4);">
+    <div style="color:white !important;-webkit-text-fill-color:white !important;font-size:2rem !important;font-weight:800 !important;margin:0 !important;line-height:1.2 !important;font-family:sans-serif;">
         🔍 AI 검색 점유율 분석 대시보드</div>
-    <div style="color:rgba(255,255,255,.85);-webkit-text-fill-color:rgba(255,255,255,.85);font-size:1rem;margin:8px 0 0;">
+    <div style="color:rgba(255,255,255,.85) !important;-webkit-text-fill-color:rgba(255,255,255,.85) !important;font-size:1rem !important;margin:8px 0 0 !important;font-family:sans-serif;">
         GPT &amp; Gemini AI 엔진에서 내 사이트 인용 점유율 측정 — 질문 직접 입력 · 비용 최적화 · 정밀 탐지</div>
 </div>""", unsafe_allow_html=True)
 
@@ -700,30 +700,27 @@ with tab_main:
     <div class="result-card" style="margin-bottom:20px;">
         <h4 style="margin:0 0 4px 0;">📝 분석 설정</h4>
         <p style="color:{_text_muted};font-size:.85rem;margin:0;">
-            사이트 URL · 브랜드명 · 업종을 입력하고, 분석할 질문을 최대 5개까지 직접 입력하세요.
+            사이트 URL · 브랜드명을 입력하고, 분석할 질문을 최대 5개까지 직접 입력하세요.
         </p>
     </div>""", unsafe_allow_html=True)
 
-    # URL + 브랜드 + 업종
-    col_u, col_b, col_i = st.columns([2, 1, 1])
+    # URL + 브랜드 (업종 제거)
+    col_u, col_b = st.columns([2, 1])
     with col_u:
         url_input = st.text_input(
             "🌐 사이트 URL *",
-            placeholder="예) naver.com",
+            placeholder="예) progress-roasup.co.kr",
             key="url_input"
         )
     with col_b:
         brand_input = st.text_input(
             "🏷️ 브랜드명 *",
             placeholder="예) 프로그레스미디어",
-            key="brand_input"
+            key="brand_input",
+            help="⚠️ 집계 데이터에 직접 반영되니 정확하게 입력해주세요!"
         )
-    with col_i:
-        industry_input = st.text_input(
-            "🏭 업종 *",
-            placeholder="예) 퍼포먼스 마케팅 광고대행사",
-            key="industry_input"
-        )
+    if brand_input.strip():
+        st.caption("⚠️ 브랜드명은 AI 응답 집계에 직접 반영됩니다. 정확한 브랜드명을 입력해주세요.")
 
     # ── 동적 질문 입력 (추가/삭제) ──
     q_count = st.session_state["q_count"]
@@ -782,7 +779,7 @@ with tab_main:
         run_btn = st.button("🚀 분석 시작", key="btn_run", use_container_width=True)
     with col_clear:
         if st.button("🗑️ 초기화", key="btn_reset", use_container_width=True):
-            for k in ["url_input","brand_input","industry_input"]:
+            for k in ["url_input","brand_input"]:
                 if k in st.session_state: del st.session_state[k]
             st.session_state["q_count"] = 1
             st.session_state["questions_list"] = [""]
@@ -823,7 +820,6 @@ with tab_main:
         errors = []
         if not url_input.strip():    errors.append("사이트 URL")
         if not brand_input.strip():  errors.append("브랜드명")
-        if not industry_input.strip(): errors.append("업종")
         if not questions_input:      errors.append("질문 (최소 1개)")
 
         if errors:
@@ -834,14 +830,13 @@ with tab_main:
             target_url  = normalize_url(url_input.strip())
             domain      = extract_domain(target_url)
             brand_name  = brand_input.strip()
-            industry    = industry_input.strip()
 
-            # biz_info 구성
+            # biz_info 구성 (업종 없음 — URL 크롤링으로 대체)
             biz_info = BusinessInfo(
                 brand_name=brand_name,
-                industry=industry,
+                industry="",
                 industry_category="기타",
-                core_product=industry,
+                core_product="",
                 target_audience="잠재 고객",
                 confidence="high",
                 crawl_tier=0,
@@ -878,11 +873,10 @@ with tab_main:
             )
 
             # ── 결과 요약 메트릭 ──
-            c1, c2, c3, c4 = st.columns(4)
+            c1, c2, c3 = st.columns(3)
             c1.metric("브랜드",   brand_name)
-            c2.metric("업종",     industry[:18])
-            c3.metric("질문 수",  f"{len(questions_input)}개")
-            c4.metric("분석 엔진", f"{(1 if client_gpt else 0)+(1 if client_gemini else 0)}개")
+            c2.metric("질문 수",  f"{len(questions_input)}개")
+            c3.metric("분석 엔진", f"{(1 if client_gpt else 0)+(1 if client_gemini else 0)}개")
 
             # ── 차트 ──
             render_bar_chart(
@@ -891,9 +885,10 @@ with tab_main:
                 f"'{brand_name}' AI 인용 점유율"
             )
 
-            # ── 경쟁사 AI 언급 집계 ──
-            st.markdown("### 🏢 AI 응답 내 경쟁사 언급 집계")
-            # 전체 결과에서 경쟁사 언급 합산
+            # ── AI 응답 내 브랜드 언급 집계 ──
+            st.markdown("### 🏢 AI 응답 내 브랜드 언급 순위")
+            st.caption("AI가 답변할 때 언급한 브랜드를 집계한 경쟁 현황입니다.")
+
             all_comp_mentions = {}
             for r in all_results:
                 cm = r.competitor_mentions if hasattr(r,"competitor_mentions") else {}
@@ -906,14 +901,27 @@ with tab_main:
             if all_comp_mentions:
                 sorted_comps = sorted(all_comp_mentions.items(), key=lambda x: x[1]["mentions"], reverse=True)
                 total_responses = sim_count * len(questions_input) * ((1 if client_gpt else 0)+(1 if client_gemini else 0))
-                for rank, (comp_brand, data) in enumerate(sorted_comps[:10], 1):
+
+                # 내 브랜드 순위 찾기
+                my_rank = None
+                for i, (comp_brand, _) in enumerate(sorted_comps, 1):
+                    if brand_name.lower() in comp_brand.lower() or comp_brand.lower() in brand_name.lower():
+                        my_rank = i
+                        break
+
+                # TOP 5 표시
+                top5 = sorted_comps[:5]
+                my_in_top5 = my_rank is not None and my_rank <= 5
+
+                for rank, (comp_brand, data) in enumerate(top5, 1):
                     mention_pct = round(data["mentions"] / max(total_responses,1) * 100, 1)
                     urls_list = list(data["urls"])[:3]
                     url_html = " ".join([f'<a href="{u}" target="_blank" style="color:#6366f1;font-size:.68rem;margin-left:4px">[링크]</a>' for u in urls_list])
-                    is_target = brand_name.lower() in comp_brand.lower()
+                    is_target = brand_name.lower() in comp_brand.lower() or comp_brand.lower() in brand_name.lower()
                     bg = f"linear-gradient(135deg,{'#2A2A2A,#333' if _dark else '#EEE,#E0E0E0'})" if is_target else _card
                     bd = ("rgba(255,255,255,.3)" if _dark else "#111") if is_target else _border
-                    mine_tag = " <span style='color:#10b981;font-size:.68rem;'>← 내 브랜드</span>" if is_target else ""
+                    mine_tag = " <span style='color:#10b981;font-size:.68rem;font-weight:700;'>← 내 브랜드</span>" if is_target else ""
+                    pct_color = '#10b981' if mention_pct>=20 else '#f59e0b' if mention_pct>=10 else '#666'
                     st.markdown(f"""
                     <div style="display:flex;align-items:center;justify-content:space-between;
                         padding:10px 14px;border-radius:9px;margin:4px 0;
@@ -929,17 +937,40 @@ with tab_main:
                             {url_html}
                         </div>
                         <div style="display:flex;align-items:center;gap:8px;">
-                            <span style="font-size:.78rem;color:{_text_muted};">
-                                {data["mentions"]}회 언급
-                            </span>
-                            <span style="background:{'#10b981' if mention_pct>=20 else '#f59e0b' if mention_pct>=10 else '#666'};
-                                color:white;padding:2px 9px;border-radius:20px;font-size:.72rem;font-weight:700;">
+                            <span style="font-size:.78rem;color:{_text_muted};">{data["mentions"]}회 언급</span>
+                            <span style="background:{pct_color};color:white;padding:2px 9px;border-radius:20px;font-size:.72rem;font-weight:700;">
                                 {mention_pct}%
                             </span>
                         </div>
                     </div>""", unsafe_allow_html=True)
+
+                # 내 브랜드가 TOP5 밖이면 별도 표시
+                if not my_in_top5:
+                    if my_rank is not None:
+                        my_data = dict(sorted_comps)[brand_name] if brand_name in dict(sorted_comps) else None
+                        # 정확한 키 찾기
+                        my_key = next((k for k,_ in sorted_comps if brand_name.lower() in k.lower() or k.lower() in brand_name.lower()), None)
+                        if my_key:
+                            my_data = all_comp_mentions[my_key]
+                            my_pct = round(my_data["mentions"] / max(total_responses,1) * 100, 1)
+                            st.markdown(f"""
+                            <div style="margin-top:8px;padding:10px 14px;border-radius:9px;
+                                background:rgba(99,102,241,.1);border:1.5px dashed #6366f1;">
+                                <div style="font-size:.78rem;color:#6366f1;font-weight:700;">
+                                    📍 내 브랜드 ({brand_name}) 현재 순위: <strong>{my_rank}위</strong>
+                                    &nbsp;·&nbsp; {my_data["mentions"]}회 언급 ({my_pct}%)
+                                </div>
+                            </div>""", unsafe_allow_html=True)
+                    else:
+                        st.markdown(f"""
+                        <div style="margin-top:8px;padding:10px 14px;border-radius:9px;
+                            background:rgba(239,68,68,.1);border:1.5px dashed #ef4444;">
+                            <div style="font-size:.78rem;color:#ef4444;font-weight:700;">
+                                📍 내 브랜드 ({brand_name})는 AI 응답에서 언급되지 않았습니다.
+                            </div>
+                        </div>""", unsafe_allow_html=True)
             else:
-                st.caption("⚠️ 경쟁사 언급 데이터가 없습니다. 경쟁사 브랜드명을 전략 분석에서 확인하세요.")
+                st.info("⚠️ 아직 브랜드 집계 데이터가 없습니다. 시뮬레이션이 완료되면 표시됩니다.")
 
             st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
@@ -1015,7 +1046,6 @@ with tab_main:
                 "ts":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
                 "domain":   domain,
                 "brand":    brand_name,
-                "industry": industry,
                 "n_q":      len(questions_input),
                 "questions": questions_input,
                 "results":  [r.to_dict() if hasattr(r,"to_dict") else r for r in all_results],
