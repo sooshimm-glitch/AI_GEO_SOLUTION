@@ -24,6 +24,7 @@ from .logger import get_logger, CaptureError
 from .cache import get_cache
 from .ai_client import call_gpt, call_gemini
 from .schemas import BusinessInfo
+from .crawler import crawl
 
 logger = get_logger("strategy_analyzer")
 
@@ -41,7 +42,7 @@ STRATEGY_SYSTEM = (
 STRATEGY_COMP_TMPL = """질문: "{question}"
 
 이 질문에 답변할 때 AI가 자주 인용할 상위 10개 브랜드를 인용 가능성 순으로 나열하세요.
-- 분석 대상: {brand_name} (업종: {industry})
+- 분석 대상: {brand_name}
 - {scope_inst}
 - {domain}도 적절한 순위에 포함
 - 반드시 실제 존재하는 브랜드와 도메인만 사용. 가상 도메인 절대 금지.
@@ -49,33 +50,30 @@ STRATEGY_COMP_TMPL = """질문: "{question}"
 JSON 배열만 출력 (다른 텍스트 없이):
 [{{"rank":1,"domain":"실제도메인.com","brand_name":"실제브랜드명","reason":"이유 20자 이내","position":"업계1위|신흥강자|틈새전문 중 택1"}}]"""
 
-STRATEGY_DIAG_TMPL = """{domain} ({brand_name}, {industry})이 "{question}"에서 \
-AI 인용 점유율이 낮은 원인 3가지.
-경쟁사 대비 구체적 문제점. 각 항목 50자 이내. 반드시 한국어로. 번호 없이 한 줄씩:"""
+STRATEGY_DIAG_TMPL = """아래는 {domain} ({brand_name})의 실제 사이트 내용입니다.
 
-STRATEGY_KW_TMPL = """{industry} 분야에서 ChatGPT·Gemini·Perplexity 같은 AI가 답변할 때 자주 인용할 가능성이 높은 블루오션 키워드 5개를 추천하세요.
+[사이트 내용]
+{site_content}
 
-조건:
-- 경쟁사가 아직 선점하지 않은 틈새 키워드
-- 실제 사용자가 AI에게 물어볼 법한 자연스러운 표현
-- 구체적인 수치·사례·비교가 포함된 키워드 우선
-- {scope_inst}
-- 반드시 한국어. 영어 금지
+위 사이트가 "{question}" 같은 질문에서 AI 인용 점유율이 낮은 원인 3가지를 분석하세요.
+사이트 내용을 직접 분석해서 구체적 문제점을 지적하세요. 각 항목 60자 이내. 번호 없이 한 줄씩:"""
 
-[좋은 예시]
-- "네이버 공식 파트너 광고대행사 ROAS 비교"
-- "중소기업 퍼포먼스 마케팅 성공 사례 2025"
-- "구글 광고 대행수수료 업계 표준 얼마"
+STRATEGY_KW_TMPL = """아래는 {domain} ({brand_name})의 실제 사이트 내용입니다.
 
+[사이트 내용]
+{site_content}
+
+위 사이트 내용을 바탕으로, ChatGPT·Gemini·Perplexity가 자주 인용할 블루오션 키워드 5개를 추천하세요.
+조건: 이 사이트의 실제 서비스/강점 반영 · 틈새 키워드 · {scope_inst} · 한국어만
 키워드만 한 줄에 하나씩, 5개만 출력:"""
 
-STRATEGY_GEO_TMPL = """{domain} ({brand_name})이 "{question}" 같은 질문에서 ChatGPT·Gemini 등 AI에 더 자주 인용되도록 홈페이지를 개선하는 방안 3가지를 작성하세요.
+STRATEGY_GEO_TMPL = """아래는 {domain} ({brand_name})의 실제 사이트 내용입니다.
 
-각 항목은 반드시:
-1. **무엇을** 바꿔야 하는지 (구체적 섹션/요소)
-2. **어떻게** 바꾸는지 (실행 가능한 구체적 문구 또는 구조)
-3. **왜** AI 인용에 도움이 되는지 (한 문장)
+[사이트 내용]
+{site_content}
 
+위 사이트가 "{question}" 같은 질문에서 AI에 더 자주 인용되도록 개선 방안 3가지를 작성하세요.
+각 항목: 1.무엇을 바꾸는지 2.어떻게 바꾸는지(실제 문구/구조) 3.왜 AI 인용에 도움되는지
 형식: 번호. **제목**\n내용 (3줄 이내)
 출력 언어: 한국어"""
 
@@ -132,6 +130,16 @@ def run_strategy_analysis(
         brand_name=domain, industry="서비스", industry_category="기타",
         core_product="서비스", target_audience="고객",
     )
+
+    # URL 크롤링 — 진단/키워드/GEO에 실제 사이트 내용 활용
+    site_content = ""
+    if target_url:
+        with CaptureError("strategy_crawl", log_level="warning"):
+            crawl_result = crawl(target_url, use_cache=True)
+            if crawl_result.ok and crawl_result.body_text:
+                site_content = crawl_result.summary(max_len=1500)
+    if not site_content:
+        site_content = f"{domain} ({biz.brand_name}) 사이트 — 크롤 데이터 없음"
 
     scope_inst = (
         "반드시 대한민국에서 서비스하는 국내 기업만 포함하세요."
@@ -202,7 +210,7 @@ def run_strategy_analysis(
         prompt = STRATEGY_DIAG_TMPL.format(
             domain=domain,
             brand_name=biz.brand_name,
-            industry=biz.industry,
+            site_content=site_content,
             question=rep_question,
         ) + sim_ctx
 
@@ -220,7 +228,9 @@ def run_strategy_analysis(
 
     def _keywords() -> list[str]:
         prompt = STRATEGY_KW_TMPL.format(
-            industry=biz.industry,
+            domain=domain,
+            brand_name=biz.brand_name,
+            site_content=site_content,
             scope_inst=scope_inst,
         )
         # BUG FIX: r = "" 초기화
@@ -243,6 +253,7 @@ def run_strategy_analysis(
         prompt = STRATEGY_GEO_TMPL.format(
             domain=domain,
             brand_name=biz.brand_name,
+            site_content=site_content,
             question=rep_question,
         )
         # BUG FIX: r = "" 초기화
