@@ -115,14 +115,8 @@ def call_gemini(
 ) -> str:
     import google.generativeai as genai
 
-    # Gemini 마크다운 아이콘/이모지 방지 지시를 프롬프트 앞에 주입
-    _clean_prompt = (
-        "중요: 마크다운 기호(_arrowRight_ 등 _word_, *, **, 이모지, 특수문자) 절대 사용 금지. "
-        "순수 텍스트만 출력.\n\n" + prompt
-    )
-
     response = model_obj.generate_content(
-        _clean_prompt,
+        prompt,
         generation_config=genai.types.GenerationConfig(
             max_output_tokens=max_tokens,
             temperature=temperature,
@@ -201,6 +195,51 @@ def _check_brand_mention(resp: str, brand_variants: list) -> bool:
     return False
 
 
+def _extract_brands_from_response(
+    resp: str,
+    client_gpt,
+    client_gemini,
+    model_gpt: str = "gpt-4o-mini",
+) -> list[str]:
+    """
+    AI 답변에서 언급된 브랜드/업체명을 추출.
+    별도 AI 호출로 정확하게 추출.
+    """
+    if not resp or len(resp) < 10:
+        return []
+
+    prompt = f"""아래 AI 답변에서 언급된 브랜드명, 회사명, 서비스명을 모두 추출하세요.
+
+[AI 답변]
+{resp[:1000]}
+
+규칙:
+- 실제 브랜드/회사/서비스 이름만 추출
+- 일반 명사 제외 (예: "광고대행사", "플랫폼" 등 단독 사용 시 제외)
+- 중복 없이
+- JSON 배열로만 출력: ["브랜드1", "브랜드2"]
+- 없으면: []"""
+
+    result = ""
+    with __import__('core.logger', fromlist=['CaptureError']).CaptureError("extract_brands", log_level="debug"):
+        if client_gpt:
+            result = call_gpt(client_gpt, prompt, max_tokens=150,
+                              model=model_gpt, temperature=0.1)
+        elif client_gemini:
+            result = call_gemini(client_gemini, prompt, max_tokens=150, temperature=0.1)
+
+    brands = []
+    try:
+        import re as _re
+        m = _re.search(r'\[.*?\]', result, _re.DOTALL)
+        if m:
+            brands = __import__('json').loads(m.group())
+            brands = [b.strip() for b in brands if isinstance(b, str) and len(b.strip()) >= 2]
+    except Exception:
+        pass
+    return brands
+
+
 def _adaptive_batch(
     call_fn:               Callable[[str], str],
     question:              str,
@@ -231,17 +270,27 @@ def _adaptive_batch(
             probe_hits += 1
         if len(samples) < 3 and (result.response_sample or hit):
             samples.append(result.response_sample or resp[:200])
-        # 경쟁사 언급 집계
-        if comp_mentions and resp:
+        # 브랜드 자동 추출 집계
+        if resp:
             import re as _re
-            resp_lower = resp.lower()
-            for comp in comp_mentions:
-                if comp.lower() in resp_lower:
-                    comp_mentions[comp]["mentions"] += 1
-                urls = _re.findall(r'https?://[^\s\)\]]+', resp)
-                for u in urls:
-                    if comp.lower() in u.lower():
-                        comp_mentions[comp]["urls"].add(u)
+            urls = _re.findall(r'https?://[^\s\)\]]+', resp)
+            # 언급된 브랜드를 comp_mentions에 동적 추가
+            extracted = _extract_brands_from_response(
+                resp, call_fn.__self__ if hasattr(call_fn, '__self__') else None, None
+            ) if False else []  # 시뮬레이션 중 별도 API 호출 비용 절감 — 파싱 방식 사용
+            # 간단 파싱: 한국어 고유명사(2글자 이상 연속) 패턴
+            ko_brands = _re.findall(r'[가-힣]{2,}(?:미디어|마케팅|광고|에이전시|컴퍼니|코퍼레이션|솔루션|테크|소프트|시스템|네트웍|커뮤니케이션)', resp)
+            en_brands = _re.findall(r'[A-Z][a-zA-Z]{2,}(?:\s[A-Z][a-zA-Z]+)*', resp)
+            for b in ko_brands + en_brands:
+                b = b.strip()
+                if len(b) >= 2 and b not in comp_mentions:
+                    comp_mentions[b] = {"mentions": 0, "urls": set()}
+                if b in comp_mentions:
+                    comp_mentions[b]["mentions"] += 1
+            for u in urls:
+                for b in comp_mentions:
+                    if b.lower() in u.lower():
+                        comp_mentions[b]["urls"].add(u)
 
     probe_rate = probe_hits / probe_n if probe_n > 0 else 0
     lo, hi     = wilson_ci(probe_hits, probe_n)
@@ -268,17 +317,22 @@ def _adaptive_batch(
             hits += 1
         if len(samples) < 3 and (result.response_sample or hit):
             samples.append(result.response_sample or resp[:200])
-        # 경쟁사 언급 집계
-        if comp_mentions and resp:
+        # 브랜드 자동 추출 집계
+        if resp:
             import re as _re
-            resp_lower = resp.lower()
-            for comp in comp_mentions:
-                if comp.lower() in resp_lower:
-                    comp_mentions[comp]["mentions"] += 1
-                urls = _re.findall(r'https?://[^\s\)\]]+', resp)
-                for u in urls:
-                    if comp.lower() in u.lower():
-                        comp_mentions[comp]["urls"].add(u)
+            urls = _re.findall(r'https?://[^\s\)\]]+', resp)
+            ko_brands = _re.findall(r'[가-힣]{2,}(?:미디어|마케팅|광고|에이전시|컴퍼니|코퍼레이션|솔루션|테크|소프트|시스템|네트웍|커뮤니케이션)', resp)
+            en_brands = _re.findall(r'[A-Z][a-zA-Z]{2,}(?:\s[A-Z][a-zA-Z]+)*', resp)
+            for b in ko_brands + en_brands:
+                b = b.strip()
+                if len(b) >= 2 and b not in comp_mentions:
+                    comp_mentions[b] = {"mentions": 0, "urls": set()}
+                if b in comp_mentions:
+                    comp_mentions[b]["mentions"] += 1
+            for u in urls:
+                for b in comp_mentions:
+                    if b.lower() in u.lower():
+                        comp_mentions[b]["urls"].add(u)
 
     # comp_mentions urls를 list로 변환
     comp_result = {k: {"mentions": v["mentions"], "urls": list(v["urls"])} for k,v in comp_mentions.items()}
