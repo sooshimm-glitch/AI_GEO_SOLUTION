@@ -167,7 +167,21 @@ def call_gemini(model_obj, prompt, max_tokens=300, temperature=0.7,
         else:
             response = model_obj.generate_content(
                 prompt, generation_config=gen_config)
-        text = (response.text or "").strip()
+
+        # finish_reason=2(MAX_TOKENS)일 때 response.text 가 예외를 던짐
+        # → candidates[0].content.parts 에서 직접 텍스트 추출
+        try:
+            text = (response.text or "").strip()
+        except (ValueError, AttributeError):
+            text = ""
+            try:
+                for part in response.candidates[0].content.parts:
+                    if hasattr(part, "text") and part.text:
+                        text += part.text
+                text = text.strip()
+            except Exception:
+                pass
+
     except Exception as e:
         logger.warning(f"Gemini call failed: {e}")
         text = ""
@@ -354,7 +368,7 @@ def run_simulation(client_gpt, client_gemini, question, target_url, model_gpt,
                         model=model_gpt, temperature=0.7, tracker=tracker)
 
     def _gem_call(q):
-        return call_gemini(client_gemini, q, max_tokens=300,
+        return call_gemini(client_gemini, q, max_tokens=1024,
                            temperature=0.7, tracker=tracker, use_search=True)
 
     gpt_hits=0; gpt_samples=[]; gpt_n=0; gpt_ran=False; gpt_comp={}
