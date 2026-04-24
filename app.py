@@ -26,7 +26,7 @@ import sys, os
 _APP_ROOT = os.path.dirname(os.path.abspath(__file__))
 if _APP_ROOT not in sys.path:
     sys.path.insert(0, _APP_ROOT)
-sys.path.insert(0, "/mount/src/ai-tool")
+sys.path.insert(0, "/mount/src/ai_geo_solution")
 
 try:
     from core.cache import get_cache          # [FIX 3] TTLCache 직접 import 제거
@@ -218,27 +218,17 @@ div[data-testid="metric-container"] [data-testid="stMetricDelta"] svg {{ display
     color:white !important; -webkit-text-fill-color:white !important;
 }}
 
-/* [FIX 4] expander arrow_down 텍스트 노출 수정 */
-/* Streamlit expander 아이콘이 텍스트로 노출되는 문제 해결 */
-[data-testid="stExpanderToggleIcon"] {{ display:none !important; }}
-[data-testid="stExpanderToggleIcon"] * {{ display:none !important; }}
-.streamlit-expander {{
-    background:{_card} !important; border:1px solid {_border} !important; border-radius:12px !important;
-}}
-.streamlit-expander summary,
-.streamlit-expander summary p {{ color:{_text} !important; -webkit-text-fill-color:{_text} !important; }}
-/* 새 Streamlit expander 셀렉터 */
-[data-testid="stExpander"] {{
-    background:{_card} !important; border:1px solid {_border} !important; border-radius:12px !important;
-}}
-[data-testid="stExpander"] summary {{
-    color:{_text} !important; -webkit-text-fill-color:{_text} !important;
-}}
-[data-testid="stExpander"] [data-testid="stMarkdownContainer"] p,
-[data-testid="stExpander"] p, [data-testid="stExpander"] span {{
-    color:{_text} !important; -webkit-text-fill-color:{_text} !important;
-}}
-
+/* ── expander arrow_down 완전 제거 ── */
+details summary svg{{display:none!important}}
+details summary svg *{{display:none!important}}
+details summary::-webkit-details-marker{{display:none!important}}
+details summary::marker{{display:none!important}}
+[data-testid="stExpanderToggleIcon"]{{display:none!important;width:0!important}}
+.streamlit-expander,details{{background:{_card}!important;border:1px solid {_border}!important;border-radius:12px!important}}
+.streamlit-expander summary,details summary{{color:{_text}!important;-webkit-text-fill-color:{_text}!important;list-style:none!important}}
+[data-testid="stExpander"]{{background:{_card}!important;border:1px solid {_border}!important;border-radius:12px!important}}
+[data-testid="stExpander"] summary{{color:{_text}!important;-webkit-text-fill-color:{_text}!important}}
+[data-testid="stExpander"] p,[data-testid="stExpander"] span{{color:{_text}!important;-webkit-text-fill-color:{_text}!important}}
 [data-testid="stDataFrame"] {{ background:{_card} !important; }}
 [data-testid="stDataFrame"] * {{ color:{_text} !important; background:{_card} !important; }}
 
