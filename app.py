@@ -558,7 +558,7 @@ with st.sidebar:
     openai_key        = st.text_input("OpenAI API Key",  type="password", placeholder="sk-...")
     gemini_key        = st.text_input("Gemini API Key",  type="password", placeholder="AIza...")
     gpt_model         = st.selectbox("GPT 모델",  ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"])
-    gemini_model_name = st.selectbox("Gemini 모델", ["models/gemini-2.0-flash", "models/gemini-flash-latest"])
+    gemini_model_name = st.selectbox("Gemini 모델",["gemini-1.5-flash","gemini-1.5-pro","gemini-2.0-flash-lite","gemini-2.5-flash-preview-04-17"])
 
     st.markdown("---")
 
