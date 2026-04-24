@@ -116,7 +116,7 @@ def _get_gemini_search_tool(genai):
         pass
     try:
         return [genai.protos.Tool(
-            google_search_retrieval=genai.protos.GoogleSearchRetrieval()
+            genai.protos.Tool(google_search=genai.protos.GoogleSearch())
         )]
     except AttributeError:
         pass
