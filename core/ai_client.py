@@ -1,13 +1,15 @@
 """
-AI 클라이언트 래퍼 v4.0
+AI 클라이언트 래퍼 v4.1
 
-핵심 수정:
-1. sim_prompt = question 그대로 전달 (래핑 제거)
-2. _adaptive_batch 반환값 통일 (항상 4-tuple)
-3. GPT도 4-tuple 언팩킹으로 통일
-4. 브랜드 변형 정확히 전달
-5. 브랜드 집계 — 한/영 패턴 추출
-6. Gemini 마크다운 금지 지시 제거
+버그 수정:
+  [BUG 1] _extract_brand_mentions — ko_pattern이 회사 접미사만 잡아서
+           일반 브랜드명("이케아", "한샘", "무인양품" 등)을 전혀 못 탐지
+           → 한국어 조사 앞 명사 패턴으로 교체
+  [BUG 2] call_gemini — Google Search Grounding 미사용
+           → Gemini 웹 UI와 달리 로컬/틈새 브랜드를 학습데이터에만 의존
+           → use_search=True 파라미터 추가, 시뮬레이션은 항상 search=True
+  [BUG 3] (citation.py 참조) build_brand_variants 하이픈 도메인 미분리
+           → avahair-avenue 에서 avahair, avenue 개별 추출 안 됨
 """
 
 import re
@@ -15,13 +17,11 @@ import json
 import concurrent.futures
 from dataclasses import dataclass, field
 from typing import Optional, Callable
-
 from core.logger import get_logger, CaptureError
 from core.cache import get_cache
 from core.citation import detect_citation, build_brand_variants, wilson_ci, CitationResult
 
 logger = get_logger("ai_client")
-
 
 # ─────────────────────────────────────────────
 # 비용 추적기
@@ -38,17 +38,17 @@ class CostTracker:
     gpt_output_tokens: int = 0
     gem_input_tokens:  int = 0
     gem_output_tokens: int = 0
-    api_calls:         int = 0
+    api_calls: int = 0
 
     def add_gpt(self, input_t: int, output_t: int):
         self.gpt_input_tokens  += input_t
         self.gpt_output_tokens += output_t
-        self.api_calls         += 1
+        self.api_calls += 1
 
     def add_gemini(self, input_t: int, output_t: int):
         self.gem_input_tokens  += input_t
         self.gem_output_tokens += output_t
-        self.api_calls         += 1
+        self.api_calls += 1
 
     @property
     def estimated_usd(self) -> float:
@@ -66,19 +66,18 @@ class CostTracker:
             "gem_tokens":    self.gem_input_tokens  + self.gem_output_tokens,
         }
 
-
 # ─────────────────────────────────────────────
 # GPT 호출
 # ─────────────────────────────────────────────
 
 def call_gpt(
     client,
-    prompt:      str,
-    system:      str = "",
-    model:       str = "gpt-4o-mini",
-    max_tokens:  int = 300,
+    prompt: str,
+    system: str = "",
+    model: str = "gpt-4o-mini",
+    max_tokens: int = 300,
     temperature: float = 0.7,
-    tracker:     Optional[CostTracker] = None,
+    tracker: Optional[CostTracker] = None,
 ) -> str:
     messages = []
     if system:
@@ -91,57 +90,95 @@ def call_gpt(
         max_tokens=max_tokens,
         temperature=temperature,
     )
-
-    result = response.choices[0].message.content or ""
-    result = result.strip()
+    result = (response.choices[0].message.content or "").strip()
 
     if tracker and hasattr(response, "usage"):
         tracker.add_gpt(
             response.usage.prompt_tokens,
             response.usage.completion_tokens,
         )
-
     return result
 
+# ─────────────────────────────────────────────
+# Gemini — Google Search Grounding 지원
+# ─────────────────────────────────────────────
 
-# ─────────────────────────────────────────────
-# Gemini 호출
-# ─────────────────────────────────────────────
+def _get_gemini_search_tool(genai):
+    """
+    Google Search Grounding 도구 반환 (SDK 버전별 fallback).
+    gemini-2.0-flash 이상: google_search
+    구형 SDK:               google_search_retrieval
+    실패 시:                None (grounding 없이 동작)
+    """
+    try:
+        return [genai.protos.Tool(google_search=genai.protos.GoogleSearch())]
+    except AttributeError:
+        pass
+    try:
+        return [genai.protos.Tool(
+            google_search_retrieval=genai.protos.GoogleSearchRetrieval()
+        )]
+    except AttributeError:
+        pass
+    return None
+
 
 def call_gemini(
     model_obj,
-    prompt:      str,
-    max_tokens:  int = 300,
+    prompt: str,
+    max_tokens: int = 300,
     temperature: float = 0.7,
-    tracker:     Optional[CostTracker] = None,
+    tracker: Optional[CostTracker] = None,
+    use_search: bool = False,
 ) -> str:
+    """
+    Gemini API 호출.
+
+    use_search=True (기본값: 시뮬레이션에서 항상 True):
+      Google Search Grounding 활성화 → Gemini 웹 UI와 동일하게 실시간 검색 참조.
+      로컬 비즈니스·최신 정보 인용 정확도 대폭 향상.
+      search 활성화 시 temperature는 API 제약으로 전달 불가.
+    """
     import google.generativeai as genai
 
-    # 마크다운 금지 지시 제거 — 실제 대화창처럼 자연스럽게
-    response = model_obj.generate_content(
-        prompt,
-        generation_config=genai.types.GenerationConfig(
+    search_tools = _get_gemini_search_tool(genai) if use_search else None
+
+    if search_tools:
+        # search 활성화 시 temperature 미지원
+        gen_config = genai.types.GenerationConfig(max_output_tokens=max_tokens)
+    else:
+        gen_config = genai.types.GenerationConfig(
             max_output_tokens=max_tokens,
             temperature=temperature,
-        ),
-    )
-
-    try:
-        text = response.text or ""
-        text = text.strip()
-    except (AttributeError, ValueError):
-        logger.warning("Gemini returned empty/blocked response")
-        text = ""
-
-    if tracker and hasattr(response, "usage_metadata"):
-        um = response.usage_metadata
-        tracker.add_gemini(
-            getattr(um, "prompt_token_count",     0),
-            getattr(um, "candidates_token_count", 0),
         )
 
-    return text
+    response = None
+    try:
+        if search_tools:
+            response = model_obj.generate_content(
+                prompt,
+                tools=search_tools,
+                generation_config=gen_config,
+            )
+        else:
+            response = model_obj.generate_content(
+                prompt,
+                generation_config=gen_config,
+            )
+        text = (response.text or "").strip()
+    except (ValueError, AttributeError):
+        text = ""
+    except Exception as e:
+        logger.warning(f"Gemini call failed: {e}")
+        text = ""
 
+    if response and tracker and hasattr(response, "usage_metadata"):
+        um = response.usage_metadata
+        tracker.add_gemini(
+            getattr(um, "prompt_token_count", 0),
+            getattr(um, "candidates_token_count", 0),
+        )
+    return text
 
 # ─────────────────────────────────────────────
 # SimResult
@@ -157,10 +194,10 @@ class SimResult:
     n:            int
     gpt_ci:       tuple
     gemini_ci:    tuple
-    gpt_samples:  list = field(default_factory=list)
-    gemini_samples: list = field(default_factory=list)
-    cost_summary: dict = field(default_factory=dict)
-    cache_hit:    bool = False
+    gpt_samples:       list = field(default_factory=list)
+    gemini_samples:    list = field(default_factory=list)
+    cost_summary:      dict = field(default_factory=dict)
+    cache_hit:         bool = False
     competitor_mentions: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -178,7 +215,6 @@ class SimResult:
             "competitor_mentions": self.competitor_mentions,
         }
 
-
 # ─────────────────────────────────────────────
 # 브랜드 집계 유틸
 # ─────────────────────────────────────────────
@@ -192,42 +228,82 @@ def _check_brand_mention(resp: str, brand_variants: list) -> bool:
     return False
 
 
+# [BUG 1 FIX] 브랜드 추출 패턴 전면 교체
+# 기존: ko_pattern = 회사 접미사 한정 → 일반 브랜드명 전혀 못 잡음
+# 수정: 한국어 조사/접미사 앞 명사 + 번호 목록 패턴으로 대부분의 브랜드 탐지
+_KO_BRAND_PATTERNS = [
+    # 번호 목록 패턴: "1. 브랜드명", "1) 브랜드명", "• 브랜드명"
+    r'(?:^|\n)\s*(?:\d+[.)]\s*|[-•*]\s*)([가-힣a-zA-Z][가-힣a-zA-Z\s]{1,15}?)(?:\s*[-–(:]|\s*\n)',
+    # 조사 앞 한국어 명사: "브랜드는", "브랜드이", "브랜드가", "브랜드을/를"
+    r'([가-힣]{2,8})(?=\s*(?:은|는|이|가|을|를|의|에서|에게|으로|로|도|만|부터|까지)\b)',
+    # 괄호 안 영문 브랜드명: "(IKEA)", "(MUJI)"
+    r'\(([A-Z][A-Za-z\s]{2,20})\)',
+]
+
+_EN_BRAND_PATTERN = r'\b([A-Z][a-zA-Z]{2,20}(?:\s[A-Z][a-zA-Z]+)?)\b'
+
+# 집계에서 제외할 일반 단어
+_MENTION_STOPWORDS = {
+    # 한국어 일반어
+    "브랜드", "제품", "서비스", "방법", "기능", "사용", "선택", "추천", "비교",
+    "가격", "품질", "디자인", "소재", "크기", "색상", "특징", "장점", "단점",
+    "구매", "배송", "환불", "고객", "매장", "온라인", "오프라인", "국내", "해외",
+    "종류", "방석", "소파", "의자", "침대", "쿠션", "인테리어", "가구", "홈",
+    # 영어 일반어
+    "The", "This", "That", "Here", "There", "Also", "And", "But", "For",
+    "With", "From", "About", "Like", "Just", "Very", "More", "Most",
+    "Best", "Good", "Great", "High", "Low", "New", "Old", "Big", "Small",
+}
+
+
 def _extract_brand_mentions(resp: str) -> dict:
     """
-    AI 답변에서 브랜드명 자동 추출 및 URL 집계.
+    [BUG 1 FIX] AI 응답에서 브랜드명 자동 추출.
+
+    수정 전: 회사 접미사(마케팅, 솔루션 등) 한정 → 일반 브랜드 전혀 못 잡음
+    수정 후: 번호 목록, 조사 앞 명사, 괄호 영문, 대문자 영문 패턴 종합 탐지
+
     반환: {브랜드명: {"mentions": N, "urls": [...]}}
     """
-    result = {}
+    result: dict = {}
     if not resp:
         return result
 
-    # 한국어 브랜드 패턴 — 업체명 접미사 포함
-    ko_pattern = r'[가-힣]{2,}(?:미디어|마케팅|광고|에이전시|컴퍼니|코퍼레이션|솔루션|테크|소프트|시스템|네트웍|커뮤니케이션|파트너스|어드바이저|컨설팅|그룹|홀딩스)'
-    # 영어 브랜드 패턴 — 대문자 시작
-    en_pattern = r'\b[A-Z][a-zA-Z]{2,}(?:\s[A-Z][a-zA-Z]+){0,2}\b'
     # URL 추출
     url_pattern = r'https?://[^\s\)\]\,]+'
+    urls = re.findall(url_pattern, resp)
 
-    ko_brands = re.findall(ko_pattern, resp)
-    en_brands = re.findall(en_pattern, resp)
-    urls      = re.findall(url_pattern, resp)
+    found_brands: list[str] = []
 
-    for b in ko_brands + en_brands:
-        b = b.strip()
-        if len(b) < 2:
-            continue
+    # 한국어 브랜드 패턴들
+    for pat in _KO_BRAND_PATTERNS:
+        matches = re.findall(pat, resp, re.MULTILINE)
+        for m in matches:
+            b = m.strip() if isinstance(m, str) else m[0].strip()
+            if b and len(b) >= 2 and b not in _MENTION_STOPWORDS:
+                found_brands.append(b)
+
+    # 영어 브랜드 패턴
+    for m in re.finditer(_EN_BRAND_PATTERN, resp):
+        b = m.group(1).strip()
+        if b and len(b) >= 3 and b not in _MENTION_STOPWORDS:
+            found_brands.append(b)
+
+    # 집계
+    for b in found_brands:
         if b not in result:
             result[b] = {"mentions": 0, "urls": []}
         result[b]["mentions"] += 1
 
-    # URL을 브랜드에 매핑
+    # URL → 브랜드 매핑
     for u in urls:
         for b in result:
-            if b.lower() in u.lower():
+            if b.lower().replace(" ", "") in u.lower():
                 if u not in result[b]["urls"]:
                     result[b]["urls"].append(u)
 
-    return result
+    # mentions=0인 항목 제거 (중복 처리 과정에서 발생 가능)
+    return {k: v for k, v in result.items() if v["mentions"] > 0}
 
 
 def _merge_brand_mentions(a: dict, b: dict) -> dict:
@@ -238,34 +314,31 @@ def _merge_brand_mentions(a: dict, b: dict) -> dict:
         mb = b.get(k, {"mentions": 0, "urls": []})
         merged[k] = {
             "mentions": ma["mentions"] + mb["mentions"],
-            "urls": list(set(ma["urls"] + mb["urls"]))
+            "urls": list(set(ma.get("urls", []) + mb.get("urls", []))),
         }
     return merged
 
-
 # ─────────────────────────────────────────────
-# 적응형 배치 실행
-# 반환: (hits, samples, n, brand_mentions_dict)  ← 항상 4-tuple
+# 적응형 배치 실행 — 항상 4-tuple 반환
 # ─────────────────────────────────────────────
 
 def _adaptive_batch(
-    call_fn:              Callable[[str], str],
-    question:             str,
-    brand_variants:       list,
-    n:                    int,
+    call_fn: Callable[[str], str],
+    question: str,
+    brand_variants: list,
+    n: int,
     early_stop_threshold: float = 0.05,
-    count_mention:        bool  = False,
+    count_mention: bool = False,
 ) -> tuple:
-    samples       = []
-    probe_n       = min(10, n)
-    probe_hits    = 0
-    all_mentions  = {}  # 누적 브랜드 집계
+    samples      = []
+    probe_n      = min(10, n)
+    probe_hits   = 0
+    all_mentions: dict = {}
 
     for _ in range(probe_n):
         resp = ""
         with CaptureError("adaptive_probe", log_level="debug"):
             resp = call_fn(question)
-
         if not resp:
             continue
 
@@ -276,8 +349,7 @@ def _adaptive_batch(
         if len(samples) < 3 and (result.response_sample or hit):
             samples.append(result.response_sample or resp[:200])
 
-        # 브랜드 집계
-        mentions = _extract_brand_mentions(resp)
+        mentions    = _extract_brand_mentions(resp)
         all_mentions = _merge_brand_mentions(all_mentions, mentions)
 
     probe_rate = probe_hits / probe_n if probe_n > 0 else 0
@@ -294,7 +366,6 @@ def _adaptive_batch(
         resp = ""
         with CaptureError("adaptive_full", log_level="debug"):
             resp = call_fn(question)
-
         if not resp:
             continue
 
@@ -305,11 +376,10 @@ def _adaptive_batch(
         if len(samples) < 3 and (result.response_sample or hit):
             samples.append(result.response_sample or resp[:200])
 
-        mentions = _extract_brand_mentions(resp)
+        mentions    = _extract_brand_mentions(resp)
         all_mentions = _merge_brand_mentions(all_mentions, mentions)
 
     return hits, samples, n, all_mentions
-
 
 # ─────────────────────────────────────────────
 # 단일 질문 시뮬레이션
@@ -318,15 +388,15 @@ def _adaptive_batch(
 def run_simulation(
     client_gpt,
     client_gemini,
-    question:   str,
+    question: str,
     target_url: str,
-    model_gpt:  str,
-    n:          int = 50,
-    biz_info:   dict = None,
-    tracker:    Optional[CostTracker] = None,
-    use_cache:  bool = True,
+    model_gpt: str,
+    n: int = 50,
+    biz_info: dict = None,
+    tracker: Optional[CostTracker] = None,
+    use_cache: bool = True,
 ) -> SimResult:
-    biz_info       = biz_info or {}
+    biz_info      = biz_info or {}
     brand_variants = build_brand_variants(target_url, biz_info)
     cache          = get_cache()
 
@@ -342,8 +412,7 @@ def run_simulation(
     else:
         cache_key = None
 
-    # ── 질문 그대로 전달 (래핑 없이 실제 대화창처럼) ──
-    sim_question = question
+    sim_question = question  # 래핑 없이 그대로 전달
 
     def _gpt_call(q: str) -> str:
         return call_gpt(
@@ -354,20 +423,24 @@ def run_simulation(
             tracker=tracker,
         )
 
+    # [BUG 2 FIX] Gemini 시뮬레이션 — Google Search Grounding 활성화
+    # 이전: use_search 없음 → 학습 데이터만 참조 → 로컬/틈새 브랜드 0% 인용
+    # 수정: use_search=True → 실시간 검색으로 Gemini 웹 UI와 동일한 인용 결과
     def _gem_call(q: str) -> str:
         return call_gemini(
             client_gemini, q,
             max_tokens=300,
             temperature=0.7,
             tracker=tracker,
+            use_search=True,    # ← Google Search Grounding ON
         )
 
     gpt_hits, gpt_samples, gpt_n = 0, [], 0
     gem_hits, gem_samples, gem_n = 0, [], 0
     gpt_ran = False
     gem_ran = False
-    gpt_comp = {}
-    gem_comp = {}
+    gpt_comp: dict = {}
+    gem_comp: dict = {}
 
     timeout = min(120, max(60, n * 2))
 
@@ -396,7 +469,6 @@ def run_simulation(
             if not ctx.ok:
                 logger.warning(f"Gemini simulation failed: {ctx.error}")
 
-    # 경쟁사 언급 합산
     merged_comp = _merge_brand_mentions(gpt_comp, gem_comp)
 
     gpt_rate = round(gpt_hits / gpt_n * 100, 1) if gpt_ran and gpt_n > 0 else None
@@ -411,8 +483,8 @@ def run_simulation(
         gpt_rate=gpt_rate,
         gemini_rate=gem_rate,
         avg_rate=avg_rate,
-        gpt_hits=gpt_hits    if gpt_ran else None,
-        gemini_hits=gem_hits if gem_ran else None,
+        gpt_hits=gpt_hits     if gpt_ran else None,
+        gemini_hits=gem_hits  if gem_ran else None,
         n=n,
         gpt_ci=gpt_ci,
         gemini_ci=gem_ci,
@@ -427,7 +499,6 @@ def run_simulation(
 
     return result
 
-
 # ─────────────────────────────────────────────
 # 전체 질문 병렬 시뮬레이션
 # ─────────────────────────────────────────────
@@ -435,14 +506,15 @@ def run_simulation(
 def run_all_simulations(
     client_gpt,
     client_gemini,
-    questions:  list,
+    questions: list,
     target_url: str,
-    model_gpt:  str,
-    n:          int = 50,
-    biz_info:   dict = None,
-    tracker:    Optional[CostTracker] = None,
-    use_cache:  bool = True,
+    model_gpt: str,
+    n: int = 50,
+    biz_info: dict = None,
+    tracker: Optional[CostTracker] = None,
+    use_cache: bool = True,
 ) -> list:
+
     def _empty_result() -> SimResult:
         return SimResult(
             gpt_rate=None, gemini_rate=None, avg_rate=None,
@@ -473,5 +545,4 @@ def run_all_simulations(
             with CaptureError("sim_future_collect", log_level="warning"):
                 fut.result(timeout=collect_timeout)
 
-    results = [r if r is not None else _empty_result() for r in results]
-    return results
+    return [r if r is not None else _empty_result() for r in results]
