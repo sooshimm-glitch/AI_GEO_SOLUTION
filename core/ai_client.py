@@ -232,6 +232,14 @@ _MENTION_STOPWORDS = {
 _KO_JOSA_ENDINGS = ('으', '에', '을', '를', '이', '의', '은', '는', '가', '도', '만')
 
 
+def _strip_markdown(text):
+    text = re.sub('[*]{1,2}([^*]+)[*]{1,2}', r'\1', text)
+    text = re.sub('_{1,2}([^_]+)_{1,2}', r'\1', text)
+    text = re.sub('`([^`]+)`', r'\1', text)
+    return text
+
+
+
 def _check_mention(resp, variants):
     rl = resp.lower()
     return any(v and len(v)>=2 and v.lower() in rl for v in variants)
@@ -239,19 +247,27 @@ def _check_mention(resp, variants):
 
 def _extract_mentions(resp):
     if not resp: return {}
+
+    # [FIX] 마크다운 제거 후 패턴 매칭
+    # Gemini는 **이케아**처럼 볼드로 응답 → ** 사이에 낀 한국어는 패턴 미탐지
+    clean = _strip_markdown(resp)
+
     result = {}
     found = []
     for pat in _KO_BRAND_PATTERNS:
-        for m in re.findall(pat, resp, re.MULTILINE):
+        for m in re.findall(pat, clean, re.MULTILINE):
             b = m.strip() if isinstance(m, str) else m
             if b and len(b)>=2 and b not in _MENTION_STOPWORDS:
                 found.append(b)
-    for m in re.finditer(_EN_BRAND_PATTERN, resp):
+    for m in re.finditer(_EN_BRAND_PATTERN, clean):
         b = m.group(1).strip()
         if b and len(b)>=3 and b not in _MENTION_STOPWORDS:
             found.append(b)
     for b in found:
         if b.endswith(_KO_JOSA_ENDINGS) or len(b)<2 or b.isdigit():
+            continue
+        # 너무 긴 매칭(문장 전체) 제외
+        if len(b) > 12:
             continue
         result[b] = {"mentions": result.get(b, {}).get("mentions", 0)+1, "urls": []}
     url_pat = r'https?://[^\s\)\]\,]+'
