@@ -244,16 +244,22 @@ _EN_BRAND_PATTERN = r'\b([A-Z][a-zA-Z]{2,20}(?:\s[A-Z][a-zA-Z]+)?)\b'
 
 # 집계에서 제외할 일반 단어
 _MENTION_STOPWORDS = {
-    # 한국어 일반어
-    "브랜드", "제품", "서비스", "방법", "기능", "사용", "선택", "추천", "비교",
+    # 한국어 일반어 (확장)
+    "브랜드", "제품", "서비스", "방법", "기능", "사용", "이용", "선택", "추천", "비교",
     "가격", "품질", "디자인", "소재", "크기", "색상", "특징", "장점", "단점",
     "구매", "배송", "환불", "고객", "매장", "온라인", "오프라인", "국내", "해외",
     "종류", "방석", "소파", "의자", "침대", "쿠션", "인테리어", "가구", "홈",
+    "다양", "인기", "유명", "전문", "일반", "최고", "최저", "최신", "기본",
+    "사이트", "홈페이지", "플랫폼", "앱", "어플", "쇼핑", "스토어", "마켓",
     # 영어 일반어
     "The", "This", "That", "Here", "There", "Also", "And", "But", "For",
     "With", "From", "About", "Like", "Just", "Very", "More", "Most",
     "Best", "Good", "Great", "High", "Low", "New", "Old", "Big", "Small",
+    "Top", "First", "Last", "Main", "Other", "Each", "Some", "Many",
 }
+
+# 조사 잘못 포함 후처리 플래그
+_KO_JOSA_ENDINGS = ('으', '에', '을', '를', '이', '의', '은', '는', '가', '도', '만')
 
 
 def _extract_brand_mentions(resp: str) -> dict:
@@ -291,6 +297,12 @@ def _extract_brand_mentions(resp: str) -> dict:
 
     # 집계
     for b in found_brands:
+        # 후처리: 조사 일부가 붙은 경우 제거 ("방석으" → 제외)
+        if b.endswith(_KO_JOSA_ENDINGS):
+            continue
+        # 2자 미만 / 순수 숫자 제외
+        if len(b) < 2 or b.isdigit():
+            continue
         if b not in result:
             result[b] = {"mentions": 0, "urls": []}
         result[b]["mentions"] += 1
