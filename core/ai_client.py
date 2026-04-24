@@ -1,14 +1,17 @@
 """
-AI 클라이언트 래퍼 — 비용 인식 샘플링 + 적응형 조기 종료
+AI 클라이언트 래퍼 v4.0
 
-수정 사항 (버그픽스):
-1. 캐시 hit 체크 언팩킹 오류 수정 — cache.get() 단일 반환값으로 통일
-2. _adaptive_batch 빈 응답 방어 처리
-3. 타임아웃 상한선 현실화 (최대 120초)
-4. call_gemini safety filter 빈 응답 AttributeError 방어
-5. results None 잔존 방어 — 수집 후 None 항목 SimResult로 교체
+핵심 수정:
+1. sim_prompt = question 그대로 전달 (래핑 제거)
+2. _adaptive_batch 반환값 통일 (항상 4-tuple)
+3. GPT도 4-tuple 언팩킹으로 통일
+4. 브랜드 변형 정확히 전달
+5. 브랜드 집계 — 한/영 패턴 추출
+6. Gemini 마크다운 금지 지시 제거
 """
 
+import re
+import json
 import concurrent.futures
 from dataclasses import dataclass, field
 from typing import Optional, Callable
@@ -26,7 +29,6 @@ logger = get_logger("ai_client")
 
 @dataclass
 class CostTracker:
-    """세션 내 API 비용 누적 추적 (USD 기준 추정)"""
     GPT_PRICE_PER_1K_INPUT:  float = 0.00015
     GPT_PRICE_PER_1K_OUTPUT: float = 0.00060
     GEM_PRICE_PER_1K_INPUT:  float = 0.000075
@@ -115,6 +117,7 @@ def call_gemini(
 ) -> str:
     import google.generativeai as genai
 
+    # 마크다운 금지 지시 제거 — 실제 대화창처럼 자연스럽게
     response = model_obj.generate_content(
         prompt,
         generation_config=genai.types.GenerationConfig(
@@ -123,12 +126,10 @@ def call_gemini(
         ),
     )
 
-    # BUG FIX: safety filter 등으로 빈 응답 반환 시 AttributeError 방어
     try:
         text = response.text or ""
         text = text.strip()
     except (AttributeError, ValueError):
-        # response.text 접근 자체가 예외를 던지는 경우 (blocked response 등)
         logger.warning("Gemini returned empty/blocked response")
         text = ""
 
@@ -160,7 +161,7 @@ class SimResult:
     gemini_samples: list = field(default_factory=list)
     cost_summary: dict = field(default_factory=dict)
     cache_hit:    bool = False
-    competitor_mentions: dict = field(default_factory=dict)  # {브랜드명: {mentions:N, urls:[...]}}
+    competitor_mentions: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -179,15 +180,11 @@ class SimResult:
 
 
 # ─────────────────────────────────────────────
-# 적응형 배치 실행
+# 브랜드 집계 유틸
 # ─────────────────────────────────────────────
 
 def _check_brand_mention(resp: str, brand_variants: list) -> bool:
-    """
-    Gemini 전용 — 브랜드명 단순 언급 체크.
-    detect_citation의 threshold(0.3) 통과 여부와 무관하게
-    브랜드 변형어가 응답에 한 번이라도 등장하면 True.
-    """
+    """브랜드 변형어가 응답에 한 번이라도 등장하면 True"""
     resp_lower = resp.lower()
     for v in brand_variants:
         if v and len(v) >= 2 and v.lower() in resp_lower:
@@ -195,65 +192,74 @@ def _check_brand_mention(resp: str, brand_variants: list) -> bool:
     return False
 
 
-def _extract_brands_from_response(
-    resp: str,
-    client_gpt,
-    client_gemini,
-    model_gpt: str = "gpt-4o-mini",
-) -> list[str]:
+def _extract_brand_mentions(resp: str) -> dict:
     """
-    AI 답변에서 언급된 브랜드/업체명을 추출.
-    별도 AI 호출로 정확하게 추출.
+    AI 답변에서 브랜드명 자동 추출 및 URL 집계.
+    반환: {브랜드명: {"mentions": N, "urls": [...]}}
     """
-    if not resp or len(resp) < 10:
-        return []
+    result = {}
+    if not resp:
+        return result
 
-    prompt = f"""아래 AI 답변에서 언급된 브랜드명, 회사명, 서비스명을 모두 추출하세요.
+    # 한국어 브랜드 패턴 — 업체명 접미사 포함
+    ko_pattern = r'[가-힣]{2,}(?:미디어|마케팅|광고|에이전시|컴퍼니|코퍼레이션|솔루션|테크|소프트|시스템|네트웍|커뮤니케이션|파트너스|어드바이저|컨설팅|그룹|홀딩스)'
+    # 영어 브랜드 패턴 — 대문자 시작
+    en_pattern = r'\b[A-Z][a-zA-Z]{2,}(?:\s[A-Z][a-zA-Z]+){0,2}\b'
+    # URL 추출
+    url_pattern = r'https?://[^\s\)\]\,]+'
 
-[AI 답변]
-{resp[:1000]}
+    ko_brands = re.findall(ko_pattern, resp)
+    en_brands = re.findall(en_pattern, resp)
+    urls      = re.findall(url_pattern, resp)
 
-규칙:
-- 실제 브랜드/회사/서비스 이름만 추출
-- 일반 명사 제외 (예: "광고대행사", "플랫폼" 등 단독 사용 시 제외)
-- 중복 없이
-- JSON 배열로만 출력: ["브랜드1", "브랜드2"]
-- 없으면: []"""
+    for b in ko_brands + en_brands:
+        b = b.strip()
+        if len(b) < 2:
+            continue
+        if b not in result:
+            result[b] = {"mentions": 0, "urls": []}
+        result[b]["mentions"] += 1
 
-    result = ""
-    with __import__('core.logger', fromlist=['CaptureError']).CaptureError("extract_brands", log_level="debug"):
-        if client_gpt:
-            result = call_gpt(client_gpt, prompt, max_tokens=150,
-                              model=model_gpt, temperature=0.1)
-        elif client_gemini:
-            result = call_gemini(client_gemini, prompt, max_tokens=150, temperature=0.1)
+    # URL을 브랜드에 매핑
+    for u in urls:
+        for b in result:
+            if b.lower() in u.lower():
+                if u not in result[b]["urls"]:
+                    result[b]["urls"].append(u)
 
-    brands = []
-    try:
-        import re as _re
-        m = _re.search(r'\[.*?\]', result, _re.DOTALL)
-        if m:
-            brands = __import__('json').loads(m.group())
-            brands = [b.strip() for b in brands if isinstance(b, str) and len(b.strip()) >= 2]
-    except Exception:
-        pass
-    return brands
+    return result
 
+
+def _merge_brand_mentions(a: dict, b: dict) -> dict:
+    """두 집계 딕셔너리 합산"""
+    merged = {}
+    for k in set(list(a.keys()) + list(b.keys())):
+        ma = a.get(k, {"mentions": 0, "urls": []})
+        mb = b.get(k, {"mentions": 0, "urls": []})
+        merged[k] = {
+            "mentions": ma["mentions"] + mb["mentions"],
+            "urls": list(set(ma["urls"] + mb["urls"]))
+        }
+    return merged
+
+
+# ─────────────────────────────────────────────
+# 적응형 배치 실행
+# 반환: (hits, samples, n, brand_mentions_dict)  ← 항상 4-tuple
+# ─────────────────────────────────────────────
 
 def _adaptive_batch(
-    call_fn:               Callable[[str], str],
-    question:              str,
-    brand_variants:        list,
-    n:                     int,
-    early_stop_threshold:  float = 0.05,
-    count_mention:         bool  = False,  # Gemini 전용: 브랜드 언급도 집계
-    competitor_names:      list  = None,   # 경쟁사 브랜드명 리스트 (언급 집계용)
+    call_fn:              Callable[[str], str],
+    question:             str,
+    brand_variants:       list,
+    n:                    int,
+    early_stop_threshold: float = 0.05,
+    count_mention:        bool  = False,
 ) -> tuple:
-    samples         = []
-    probe_n         = min(10, n)
-    probe_hits      = 0
-    # 경쟁사 언급 카운터: {브랜드명: {mentions:0, urls:set()}}
-    comp_mentions   = {c: {"mentions": 0, "urls": set()} for c in (competitor_names or [])}
+    samples       = []
+    probe_n       = min(10, n)
+    probe_hits    = 0
+    all_mentions  = {}  # 누적 브랜드 집계
 
     for _ in range(probe_n):
         resp = ""
@@ -264,43 +270,24 @@ def _adaptive_batch(
             continue
 
         result: CitationResult = detect_citation(resp, brand_variants)
-        # Gemini: 정식 citation OR 단순 언급 모두 집계
         hit = result.cited or (count_mention and _check_brand_mention(resp, brand_variants))
         if hit:
             probe_hits += 1
         if len(samples) < 3 and (result.response_sample or hit):
             samples.append(result.response_sample or resp[:200])
-        # 브랜드 자동 추출 집계
-        if resp:
-            import re as _re
-            urls = _re.findall(r'https?://[^\s\)\]]+', resp)
-            # 언급된 브랜드를 comp_mentions에 동적 추가
-            extracted = _extract_brands_from_response(
-                resp, call_fn.__self__ if hasattr(call_fn, '__self__') else None, None
-            ) if False else []  # 시뮬레이션 중 별도 API 호출 비용 절감 — 파싱 방식 사용
-            # 간단 파싱: 한국어 고유명사(2글자 이상 연속) 패턴
-            ko_brands = _re.findall(r'[가-힣]{2,}(?:미디어|마케팅|광고|에이전시|컴퍼니|코퍼레이션|솔루션|테크|소프트|시스템|네트웍|커뮤니케이션)', resp)
-            en_brands = _re.findall(r'[A-Z][a-zA-Z]{2,}(?:\s[A-Z][a-zA-Z]+)*', resp)
-            for b in ko_brands + en_brands:
-                b = b.strip()
-                if len(b) >= 2 and b not in comp_mentions:
-                    comp_mentions[b] = {"mentions": 0, "urls": set()}
-                if b in comp_mentions:
-                    comp_mentions[b]["mentions"] += 1
-            for u in urls:
-                for b in comp_mentions:
-                    if b.lower() in u.lower():
-                        comp_mentions[b]["urls"].add(u)
+
+        # 브랜드 집계
+        mentions = _extract_brand_mentions(resp)
+        all_mentions = _merge_brand_mentions(all_mentions, mentions)
 
     probe_rate = probe_hits / probe_n if probe_n > 0 else 0
     lo, hi     = wilson_ci(probe_hits, probe_n)
 
-    # 조기 종료 조건
+    # 조기 종료
     if (hi < early_stop_threshold * 100) or (lo > (1 - early_stop_threshold) * 100):
         logger.info(f"조기 종료: rate={probe_rate:.1%}, CI=[{lo:.1f},{hi:.1f}]%")
         remaining_hits = round(probe_rate * (n - probe_n))
-        comp_result = {k: {"mentions": v["mentions"], "urls": list(v["urls"])} for k,v in comp_mentions.items()}
-        return probe_hits + remaining_hits, samples, n, comp_result
+        return probe_hits + remaining_hits, samples, n, all_mentions
 
     hits = probe_hits
     for _ in range(n - probe_n):
@@ -317,26 +304,11 @@ def _adaptive_batch(
             hits += 1
         if len(samples) < 3 and (result.response_sample or hit):
             samples.append(result.response_sample or resp[:200])
-        # 브랜드 자동 추출 집계
-        if resp:
-            import re as _re
-            urls = _re.findall(r'https?://[^\s\)\]]+', resp)
-            ko_brands = _re.findall(r'[가-힣]{2,}(?:미디어|마케팅|광고|에이전시|컴퍼니|코퍼레이션|솔루션|테크|소프트|시스템|네트웍|커뮤니케이션)', resp)
-            en_brands = _re.findall(r'[A-Z][a-zA-Z]{2,}(?:\s[A-Z][a-zA-Z]+)*', resp)
-            for b in ko_brands + en_brands:
-                b = b.strip()
-                if len(b) >= 2 and b not in comp_mentions:
-                    comp_mentions[b] = {"mentions": 0, "urls": set()}
-                if b in comp_mentions:
-                    comp_mentions[b]["mentions"] += 1
-            for u in urls:
-                for b in comp_mentions:
-                    if b.lower() in u.lower():
-                        comp_mentions[b]["urls"].add(u)
 
-    # comp_mentions urls를 list로 변환
-    comp_result = {k: {"mentions": v["mentions"], "urls": list(v["urls"])} for k,v in comp_mentions.items()}
-    return hits, samples, n, comp_result
+        mentions = _extract_brand_mentions(resp)
+        all_mentions = _merge_brand_mentions(all_mentions, mentions)
+
+    return hits, samples, n, all_mentions
 
 
 # ─────────────────────────────────────────────
@@ -358,35 +330,35 @@ def run_simulation(
     brand_variants = build_brand_variants(target_url, biz_info)
     cache          = get_cache()
 
-    # BUG FIX: cache.get()은 단일 값 반환 — 언팩킹 제거
     if use_cache:
         cache_key = cache.make_key(
             "sim", target_url, question, model_gpt,
             n, ",".join(sorted(brand_variants))
         )
         cached = cache.get(cache_key)
-        if cached:
+        if cached is not None:
             logger.info(f"Cache HIT: simulation({question[:30]}...)")
             return SimResult(cache_hit=True, **cached)
     else:
         cache_key = None
 
-    sim_prompt = f"질문: {question}\n\n답변:"
+    # ── 질문 그대로 전달 (래핑 없이 실제 대화창처럼) ──
+    sim_question = question
 
     def _gpt_call(q: str) -> str:
         return call_gpt(
             client_gpt, q,
-            max_tokens=180,
+            max_tokens=300,
             model=model_gpt,
-            temperature=0.6,
+            temperature=0.7,
             tracker=tracker,
         )
 
     def _gem_call(q: str) -> str:
         return call_gemini(
             client_gemini, q,
-            max_tokens=180,
-            temperature=0.6,
+            max_tokens=300,
+            temperature=0.7,
             tracker=tracker,
         )
 
@@ -394,24 +366,22 @@ def run_simulation(
     gem_hits, gem_samples, gem_n = 0, [], 0
     gpt_ran = False
     gem_ran = False
+    gpt_comp = {}
+    gem_comp = {}
 
-    # BUG FIX: 타임아웃 상한 현실화 — 최대 120초, 최소 60초
     timeout = min(120, max(60, n * 2))
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
         futures = {}
         if client_gpt:
             futures["gpt"] = ex.submit(
-                _adaptive_batch, _gpt_call, sim_prompt, brand_variants, n
+                _adaptive_batch, _gpt_call, sim_question, brand_variants, n, 0.05, False
             )
         if client_gemini:
             futures["gem"] = ex.submit(
-                _adaptive_batch, _gem_call, sim_prompt, brand_variants, n,
-                0.05, True  # count_mention=True: 브랜드 언급도 집계
+                _adaptive_batch, _gem_call, sim_question, brand_variants, n, 0.05, True
             )
 
-        gpt_comp = {}
-        gem_comp = {}
         if "gpt" in futures:
             with CaptureError("gpt_future", log_level="warning") as ctx:
                 gpt_hits, gpt_samples, gpt_n, gpt_comp = futures["gpt"].result(timeout=timeout)
@@ -425,17 +395,9 @@ def run_simulation(
                 gem_ran = True
             if not ctx.ok:
                 logger.warning(f"Gemini simulation failed: {ctx.error}")
-        
-        # 경쟁사 언급 합산
-        all_comps = set(list(gpt_comp.keys()) + list(gem_comp.keys()))
-        merged_comp = {}
-        for c in all_comps:
-            gm = gpt_comp.get(c, {"mentions":0,"urls":[]})
-            gn = gem_comp.get(c, {"mentions":0,"urls":[]})
-            merged_comp[c] = {
-                "mentions": gm["mentions"] + gn["mentions"],
-                "urls": list(set(gm["urls"] + gn["urls"]))
-            }
+
+    # 경쟁사 언급 합산
+    merged_comp = _merge_brand_mentions(gpt_comp, gem_comp)
 
     gpt_rate = round(gpt_hits / gpt_n * 100, 1) if gpt_ran and gpt_n > 0 else None
     gem_rate = round(gem_hits / gem_n * 100, 1) if gem_ran and gem_n > 0 else None
@@ -449,7 +411,7 @@ def run_simulation(
         gpt_rate=gpt_rate,
         gemini_rate=gem_rate,
         avg_rate=avg_rate,
-        gpt_hits=gpt_hits   if gpt_ran else None,
+        gpt_hits=gpt_hits    if gpt_ran else None,
         gemini_hits=gem_hits if gem_ran else None,
         n=n,
         gpt_ci=gpt_ci,
@@ -481,7 +443,6 @@ def run_all_simulations(
     tracker:    Optional[CostTracker] = None,
     use_cache:  bool = True,
 ) -> list:
-    # BUG FIX: None 잔존 방지용 기본 SimResult 팩토리
     def _empty_result() -> SimResult:
         return SimResult(
             gpt_rate=None, gemini_rate=None, avg_rate=None,
@@ -503,8 +464,7 @@ def run_all_simulations(
             logger.warning(f"[sim_q{idx}] 오류: {e}")
             results[idx] = _empty_result()
 
-    max_workers = min(len(questions), 5)
-    # BUG FIX: 전체 타임아웃도 현실화
+    max_workers     = min(len(questions), 5)
     collect_timeout = min(300, max(90, n * 3))
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
@@ -513,7 +473,5 @@ def run_all_simulations(
             with CaptureError("sim_future_collect", log_level="warning"):
                 fut.result(timeout=collect_timeout)
 
-    # BUG FIX: None이 남아있는 슬롯 교체 (스레드 예외로 results[idx] 미설정된 경우)
     results = [r if r is not None else _empty_result() for r in results]
-
     return results
