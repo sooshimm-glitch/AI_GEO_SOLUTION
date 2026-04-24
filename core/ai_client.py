@@ -105,21 +105,14 @@ def call_gpt(
 
 def _get_gemini_search_tool(genai):
     """
-    Google Search Grounding 도구 반환 (SDK 버전별 fallback).
-    gemini-2.0-flash 이상: google_search
-    구형 SDK:               google_search_retrieval
-    실패 시:                None (grounding 없이 동작)
+    Google Search Grounding 도구 반환.
+    gemini-2.5 이상: google_search 전용 (google_search_retrieval → 400 오류)
     """
     try:
         return [genai.protos.Tool(google_search=genai.protos.GoogleSearch())]
-    except AttributeError:
+    except Exception:
         pass
-    try:
-        return [genai.protos.Tool(
-            genai.protos.Tool(google_search=genai.protos.GoogleSearch())
-        )]
-    except AttributeError:
-        pass
+    # google_search_retrieval 은 gemini-2.5에서 지원 안 함 — 사용하지 않음
     return None
 
 
@@ -454,8 +447,9 @@ def run_simulation(
     gpt_comp: dict = {}
     gem_comp: dict = {}
 
-    timeout = max(300, n * 12)           # → 360초
-collect_timeout = max(420, n * 15)   # → 450초
+    # Google Search Grounding 활성화 시 호출당 5~15초 소요
+    # n=30 기준 최소 300초 필요 → 넉넉하게 설정
+    timeout = max(300, n * 12)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
         futures = {}
@@ -550,7 +544,7 @@ def run_all_simulations(
             results[idx] = _empty_result()
 
     max_workers     = min(len(questions), 5)
-    collect_timeout = min(300, max(90, n * 3))
+    collect_timeout = max(420, n * 15)  # search 포함 여유 타임아웃
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
         futs = {ex.submit(_sim_one, i, q): i for i, q in enumerate(questions)}
