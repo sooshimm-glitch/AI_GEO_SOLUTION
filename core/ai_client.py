@@ -246,7 +246,15 @@ def _strip_markdown(text):
 
 def _check_mention(resp, variants):
     rl = resp.lower()
-    return any(v and len(v) >= 2 and v.lower() in rl for v in variants)
+    for v in variants:
+        if not v or len(v) < 2:
+            continue
+        if v.lower() in rl:
+            return True
+        # 부분 매칭 (공백 제거)
+        if v.lower().replace(" ", "") in rl.replace(" ", ""):
+            return True
+    return False
 
 
 def _extract_mentions(resp):
