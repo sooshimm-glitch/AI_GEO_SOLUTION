@@ -311,7 +311,7 @@ def _adaptive_batch(call_fn, question, brand_variants, n,
         if not resp:
             continue
         result = detect_citation(resp, brand_variants)
-        hit = result.cited or (count_mention and _check_mention(resp, brand_variants))
+        hit = result.cited or (count_mention and _check_mention(resp, brand_variants)) or (count_mention and bool(re.search(re.escape(brand_variants[0]) if brand_variants else 'NOMATCH', resp, re.IGNORECASE)))
         if hit:
             probe_hits += 1
         if len(samples) < 3 and (result.response_sample or hit):
@@ -332,7 +332,7 @@ def _adaptive_batch(call_fn, question, brand_variants, n,
         if not resp:
             continue
         result = detect_citation(resp, brand_variants)
-        hit = result.cited or (count_mention and _check_mention(resp, brand_variants))
+        hit = result.cited or (count_mention and _check_mention(resp, brand_variants)) or (count_mention and bool(re.search(re.escape(brand_variants[0]) if brand_variants else 'NOMATCH', resp, re.IGNORECASE)))
         if hit:
             hits += 1
         if len(samples) < 3 and (result.response_sample or hit):
