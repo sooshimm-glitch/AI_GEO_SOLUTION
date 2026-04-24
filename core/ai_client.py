@@ -454,7 +454,8 @@ def run_simulation(
     gpt_comp: dict = {}
     gem_comp: dict = {}
 
-    timeout = min(120, max(60, n * 2))
+    timeout = max(300, n * 12)           # → 360초
+collect_timeout = max(420, n * 15)   # → 450초
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
         futures = {}
