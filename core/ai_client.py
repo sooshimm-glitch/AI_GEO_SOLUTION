@@ -368,8 +368,8 @@ def run_simulation(client_gpt, client_gemini, question, target_url, model_gpt,
                         model=model_gpt, temperature=0.7, tracker=tracker)
 
     def _gem_call(q):
-        return call_gemini(client_gemini, q, max_tokens=1024,
-                           temperature=0.7, tracker=tracker, use_search=True)
+    return call_gemini(client_gemini, q, max_tokens=1024,
+                       temperature=0.7, tracker=tracker, use_search=False)
 
     gpt_hits=0; gpt_samples=[]; gpt_n=0; gpt_ran=False; gpt_comp={}
     gem_hits=0; gem_samples=[]; gem_n=0; gem_ran=False; gem_comp={}
