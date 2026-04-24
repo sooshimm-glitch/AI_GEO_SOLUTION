@@ -734,7 +734,7 @@ if st.session_state.get("run_demo"):
         avg = r.get("avg_rate", 0)
         badge_cls = "share-badge-high" if avg >= 30 else "share-badge-mid" if avg >= 10 else "share-badge-low"
         # [FIX 4] expander label에서 이모지 제거 (arrow_down 방지)
-        with st.expander(f"Q{i+1}. {q[:55]}{'...' if len(q)>55 else ''} — 평균 {avg:.1f}%", expanded=(i==0)):
+       with st.expander(f"Q{i+1}. {q[:55]}{'...' if len(q)>55 else ''} - 평균 {avg:.1f}%", expanded=(i==0)):
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("GPT",    f"{r.get('gpt_rate',0)}%")
             c2.metric("Gemini", f"{r.get('gemini_rate',0)}%")
