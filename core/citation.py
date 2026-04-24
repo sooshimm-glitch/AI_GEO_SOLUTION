@@ -1,12 +1,10 @@
 """
-문맥 인식 인용 탐지 엔진
+문맥 인식 인용 탐지 엔진 v2.2
 
-수정 사항 (버그픽스):
-1. detect_citation 패턴3 confidence 0.25 → 0.32로 올려 threshold(0.3) 이상 보장
-2. _check_context_window boost 상한 0.4 → 0.35, 계산 방식 개선
-3. detect_citation URL 패턴에서 find()가 -1 반환 시 잘못된 슬라이싱 방어
-4. wilson_ci hits > n 방어 — p를 [0,1] 범위로 클램프
-5. build_brand_variants _KO2EN/_EN2KO 중복 루프 정리
+버그 수정:
+  [BUG 3 FIX] build_brand_variants — 하이픈 도메인 미분리
+              avahair-avenue.com → avahair, avenue 개별 추출 안 됨
+              → 하이픈 분리 + 한글 브랜드 공백 변형 추가
 """
 
 import re
@@ -14,7 +12,6 @@ import math
 from dataclasses import dataclass, field
 from typing import Optional
 from urllib.parse import urlparse
-
 from .logger import get_logger
 
 logger = get_logger("citation")
@@ -22,19 +19,19 @@ logger = get_logger("citation")
 
 @dataclass
 class CitationMatch:
-    brand_variant:   str    # 매칭된 변형어
-    pattern_type:    str    # url / entity / citation / mention
-    context_snippet: str    # 매칭 전후 50자
-    confidence:      float  # 0.0~1.0
-    is_negative:     bool   = False
-    position:        int    = -1
+    brand_variant:    str    # 매칭된 변형어
+    pattern_type:     str    # url / entity / citation / mention
+    context_snippet:  str    # 매칭 전후 80자
+    confidence:       float  # 0.0~1.0
+    is_negative:      bool = False
+    position:         int  = -1
 
 
 @dataclass
 class CitationResult:
-    cited:           bool
-    confidence:      float
-    matches:         list[CitationMatch] = field(default_factory=list)
+    cited:      bool
+    confidence: float
+    matches:    list = field(default_factory=list)
     response_sample: str = ""
 
     @property
@@ -43,7 +40,7 @@ class CitationResult:
 
 
 # ─────────────────────────────────────────────
-# 브랜드 변형 생성
+# EN↔KO 매핑
 # ─────────────────────────────────────────────
 
 _EN2KO = {
@@ -64,11 +61,27 @@ _BLACKLIST = {
     "www", "http", "https", "서비스", "쇼핑", "앱",
 }
 
+# 너무 일반적인 단어는 하이픈 파트로 추가하지 않음
+_GENERIC_WORDS = {
+    "hair", "shop", "store", "cafe", "bar", "salon", "house",
+    "home", "art", "studio", "lab", "hub", "zone", "space",
+    "pro", "plus", "max", "go", "one", "two", "app",
+}
+
 
 def build_brand_variants(target_url: str, biz_info: dict) -> list[str]:
     """
-    탐지 변형 목록 — 정밀도 우선 (오탐 최소화).
-    최소 2자 이상, 순수 숫자·블랙리스트 제외.
+    탐지 변형 목록 — 정밀도 + 재현율 균형.
+
+    [BUG 3 FIX] 하이픈 도메인 처리 추가:
+      avahair-avenue.com
+        → avahair-avenue (원본 스템)
+        → avahair        (첫 번째 파트, 브랜드 핵심어)
+        → avahairavenue  (하이픈 제거 합성)
+        avenue는 _GENERIC_WORDS에 없으므로 추가
+
+    [추가] 한글 브랜드명 공백 변형:
+      에이바헤어 → 에이바 헤어 (공백 중간 삽입)
     """
     try:
         p = urlparse(target_url if target_url.startswith("http") else "https://" + target_url)
@@ -76,29 +89,65 @@ def build_brand_variants(target_url: str, biz_info: dict) -> list[str]:
     except Exception:
         domain = target_url
 
-    domain_stem = domain.split(".")[0].lower()
+    domain_stem = domain.split(".")[0].lower()   # e.g. "avahair-avenue"
     brand_name  = (biz_info.get("brand_name") or "").strip()
+
     variants: set[str] = set()
 
-    # 1. 도메인 기반
+    # ── 1. 도메인 기반 ──
     variants.add(domain.lower())
     if len(domain_stem) >= 3:
         variants.add(domain_stem)
 
-    # 2. 브랜드명 기반
+    # ── 2. [FIX] 하이픈 도메인 분리 ──
+    if "-" in domain_stem:
+        parts = domain_stem.split("-")
+
+        # 2-1. 하이픈 제거 합성: avahair-avenue → avahairavenue
+        joined = "".join(parts)
+        if len(joined) >= 3:
+            variants.add(joined)
+
+        # 2-2. 첫 번째 파트 (브랜드 핵심어): avahair
+        if len(parts[0]) >= 3:
+            variants.add(parts[0])
+
+        # 2-3. 나머지 파트 — 일반어 블랙리스트 제외 후 추가
+        for part in parts[1:]:
+            if len(part) >= 3 and part not in _BLACKLIST and part not in _GENERIC_WORDS:
+                variants.add(part)
+
+    # ── 3. 브랜드명 기반 ──
     if brand_name and len(brand_name) >= 2:
         variants.add(brand_name)
         variants.add(brand_name.lower())
+
+        # 공백 제거 버전
         no_space = brand_name.replace(" ", "")
         if len(no_space) >= 2:
             variants.add(no_space.lower())
 
-    # BUG FIX: EN↔KO 매핑 — 중복 루프 통합
-    # stem 기반 EN→KO
-    if domain_stem in _EN2KO:
-        variants.add(_EN2KO[domain_stem])
+        # [추가] 한글 브랜드명 공백 삽입 변형
+        # "에이바헤어" → "에이바 헤어", "에이 바헤어"
+        if re.search(r'[가-힣]', brand_name) and len(brand_name) >= 4:
+            mid = len(brand_name) // 2
+            for split_at in [mid - 1, mid, mid + 1]:
+                if 2 <= split_at <= len(brand_name) - 2:
+                    spaced = brand_name[:split_at] + " " + brand_name[split_at:]
+                    if len(spaced) >= 3:
+                        variants.add(spaced)
 
-    # brand_name 기반 양방향 매핑
+    # ── 4. EN↔KO 매핑 ──
+    # 스템 및 하이픈 파트 기반
+    check_parts = [domain_stem]
+    if "-" in domain_stem:
+        check_parts += domain_stem.split("-")
+
+    for part in check_parts:
+        if part in _EN2KO:
+            variants.add(_EN2KO[part])
+
+    # 브랜드명 기반 양방향
     if brand_name:
         bn_lower = brand_name.lower()
         for en, ko in _EN2KO.items():
@@ -110,14 +159,15 @@ def build_brand_variants(target_url: str, biz_info: dict) -> list[str]:
                 variants.add(en)
                 variants.add(ko)
 
-    # 3. 약칭 (영문 2글자 이상)
+    # ── 5. 약칭 (영문 2글자 이상) ──
     if brand_name:
-        words  = brand_name.split()
+        words = brand_name.split()
         if len(words) >= 2:
             abbrev = "".join(w[0] for w in words if w).lower()
             if len(abbrev) >= 2:
                 variants.add(abbrev)
 
+    # ── 필터: 최소 2자, 순수 숫자 제외, 블랙리스트 제외 ──
     return [
         v for v in variants
         if v and len(v) >= 2 and not v.isdigit() and v.lower() not in _BLACKLIST
@@ -131,16 +181,17 @@ def build_brand_variants(target_url: str, biz_info: dict) -> list[str]:
 _CITATION_PATTERNS_KO = [
     r"(?:에\s*따르면|에서\s*발표|에서\s*제공|이\s*발표한|가\s*공개한)",
     r"(?:공식\s*사이트|홈페이지|웹사이트)\s*[은는이가]",
-    r"(?:서비스|플랫폼|솔루션)\s*[을를은는이가]",
-    r"(?:에서\s*확인|통해\s*확인|에서\s*이용)",
-    r"(?:추천|권장|사용|이용|선택)\s*(?:합니다|드립니다|할\s*수\s*있습니다)",
+    r"(?:서비스|플랫폼|솔루션|매장|가게|미용실|헤어샵)\s*[을를은는이가]",
+    r"(?:에서\s*확인|통해\s*확인|에서\s*이용|방문)",
+    r"(?:추천|권장|사용|이용|선택|예약)\s*(?:합니다|드립니다|할\s*수\s*있습니다|해보세요)",
+    r"(?:위치|주소|전화|영업)",
 ]
 
 _CITATION_PATTERNS_EN = [
     r"(?:according\s+to|based\s+on|via|through|from|at)\s+\w",
-    r"(?:website|platform|service|solution|tool|app)\s",
-    r"(?:recommend|suggest|use|try|visit|check)",
-    r"(?:official|verified|trusted|reliable)",
+    r"(?:website|platform|service|solution|tool|app|salon|shop)\s",
+    r"(?:recommend|suggest|use|try|visit|check|book)",
+    r"(?:official|verified|trusted|reliable|nearby|located)",
 ]
 
 _NEGATIVE_PATTERNS_KO = [
@@ -158,14 +209,7 @@ _ALL_CITATION = _CITATION_PATTERNS_KO + _CITATION_PATTERNS_EN
 _ALL_NEGATIVE = _NEGATIVE_PATTERNS_KO + _NEGATIVE_PATTERNS_EN
 
 
-def _check_context_window(
-    text: str, pos: int, window: int = 80
-) -> tuple[str, bool, float]:
-    """
-    브랜드명 위치(pos) 주변 window 문자 내 문맥 분석.
-    반환: (snippet, is_negative, confidence_boost)
-    """
-    # BUG FIX: pos=-1(find 실패) 방어
+def _check_context_window(text: str, pos: int, window: int = 80) -> tuple:
     if pos < 0:
         return "", False, 0.0
 
@@ -173,13 +217,10 @@ def _check_context_window(
     end     = min(len(text), pos + window)
     snippet = text[start:end]
 
-    # 부정 패턴 체크
     for pat in _ALL_NEGATIVE:
         if re.search(pat, snippet, re.IGNORECASE):
             return snippet, True, 0.0
 
-    # BUG FIX: 인용 패턴 boost — 매칭 수에 비례, 상한 0.35
-    boost       = 0.0
     match_count = 0
     for pat in _ALL_CITATION:
         if re.search(pat, snippet, re.IGNORECASE):
@@ -191,92 +232,69 @@ def _check_context_window(
 
 def detect_citation(
     response: str,
-    brand_variants: list[str],
+    brand_variants: list,
     threshold: float = 0.3,
 ) -> CitationResult:
-    """
-    문맥 인식 인용 탐지.
-
-    탐지 우선순위:
-    1. URL 패턴 매칭           (confidence: 0.9)
-    2. 단어 경계 매칭 + 문맥   (0.55~0.9)
-    3. 단순 포함 + 문맥 검증   (0.32~0.67)  ← BUG FIX: 0.25→0.32
-
-    threshold 미만이면 cited=False.
-    """
     if not response or not brand_variants:
         return CitationResult(cited=False, confidence=0.0)
 
-    response_lower  = response.lower()
-    best_confidence = 0.0
-    all_matches: list[CitationMatch] = []
+    response_lower   = response.lower()
+    best_confidence  = 0.0
+    all_matches: list = []
 
     for variant in brand_variants:
         if not variant or len(variant) < 2:
             continue
-
         v_lower = variant.lower()
 
         # ── 패턴 1: URL 매칭 (최고 신뢰도) ──
-        url_pat   = re.escape(v_lower)
         url_match = re.search(
-            rf'https?://[^\s]*{url_pat}|{url_pat}\.[a-z]{{2,6}}',
-            response_lower
+            rf'https?://[^\s]*{re.escape(v_lower)}|{re.escape(v_lower)}\.[a-z]{{2,6}}',
+            response_lower,
         )
         if url_match:
             pos = url_match.start()
-            # BUG FIX: regex 매칭 위치 사용 (find() 대신)
             snippet, is_neg, boost = _check_context_window(response_lower, pos)
             conf = 0.0 if is_neg else min(0.9 + boost, 1.0)
             all_matches.append(CitationMatch(
-                brand_variant=variant,
-                pattern_type="url",
-                context_snippet=snippet,
-                confidence=conf,
-                is_negative=is_neg,
-                position=pos,
+                brand_variant=variant, pattern_type="url",
+                context_snippet=snippet, confidence=conf,
+                is_negative=is_neg, position=pos,
             ))
             best_confidence = max(best_confidence, conf)
             continue
 
         # ── 패턴 2: 단어 경계 매칭 ──
-        is_korean   = bool(re.search(r'[가-힣]', v_lower))
+        is_korean = bool(re.search(r'[가-힣]', v_lower))
         if is_korean:
             boundary_pat = rf'(?<![가-힣a-z0-9]){re.escape(v_lower)}(?![가-힣a-z0-9])'
         else:
             boundary_pat = rf'\b{re.escape(v_lower)}\b'
 
         for m_obj in re.finditer(boundary_pat, response_lower, re.IGNORECASE):
-            pos     = m_obj.start()
+            pos = m_obj.start()
             snippet, is_neg, boost = _check_context_window(response_lower, pos)
-            conf    = 0.0 if is_neg else (0.55 + boost)
+            conf = 0.0 if is_neg else (0.55 + boost)
             all_matches.append(CitationMatch(
-                brand_variant=variant,
-                pattern_type="entity",
-                context_snippet=snippet,
-                confidence=conf,
-                is_negative=is_neg,
-                position=pos,
+                brand_variant=variant, pattern_type="entity",
+                context_snippet=snippet, confidence=conf,
+                is_negative=is_neg, position=pos,
             ))
             best_confidence = max(best_confidence, conf)
-            break  # 첫 매칭만
+            break
 
         if best_confidence >= 0.6:
-            continue  # 충분히 확신, 다음 변형 체크 불필요
+            continue
 
-        # ── 패턴 3: 단순 포함 (낮은 신뢰도, 문맥 검증 필수) ──
+        # ── 패턴 3: 단순 포함 (기본 confidence 0.32 — threshold 0.3 이상) ──
         idx = response_lower.find(v_lower)
         if idx >= 0:
             snippet, is_neg, boost = _check_context_window(response_lower, idx)
-            # BUG FIX: 기본 confidence 0.25 → 0.32 (threshold 0.3 이상 보장)
             conf = 0.0 if is_neg else (0.32 + boost)
             all_matches.append(CitationMatch(
-                brand_variant=variant,
-                pattern_type="mention",
-                context_snippet=snippet,
-                confidence=conf,
-                is_negative=is_neg,
-                position=idx,
+                brand_variant=variant, pattern_type="mention",
+                context_snippet=snippet, confidence=conf,
+                is_negative=is_neg, position=idx,
             ))
             best_confidence = max(best_confidence, conf)
 
@@ -287,9 +305,7 @@ def detect_citation(
         cited=cited,
         confidence=best_confidence,
         matches=all_matches,
-        response_sample=(
-            best_match.context_snippet if best_match and cited else ""
-        ),
+        response_sample=(best_match.context_snippet if best_match and cited else ""),
     )
 
 
@@ -297,20 +313,15 @@ def detect_citation(
 # 통계 유틸
 # ─────────────────────────────────────────────
 
-def wilson_ci(hits: int, n: int, confidence: float = 0.95) -> tuple[float, float]:
-    """Wilson Score Interval — 소표본에서도 안정적."""
+def wilson_ci(hits: int, n: int, confidence: float = 0.95) -> tuple:
     if n == 0:
         return 0.0, 100.0
-
-    # BUG FIX: 조기종료 추정으로 hits > n 가능 → p를 [0,1] 클램프
     hits = max(0, min(hits, n))
     p    = hits / n
+    z    = 1.96 if confidence == 0.95 else 2.576
 
-    z      = 1.96 if confidence == 0.95 else 2.576
-    denom  = 1 + z**2 / n
-    center = (p + z**2 / (2 * n)) / denom
-
-    # p*(1-p) 가 음수가 되지 않도록 보장
+    denom    = 1 + z**2 / n
+    center   = (p + z**2 / (2 * n)) / denom
     variance = max(0.0, p * (1 - p) / n + z**2 / (4 * n**2))
     margin   = (z * math.sqrt(variance)) / denom
 
