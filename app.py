@@ -685,7 +685,7 @@ st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
 # 탭: 분석 / 히스토리
 # ─────────────────────────────────────────────
 
-tab_main, tab_hist = st.tabs(["🔍 인용 점유율 분석", "📅 히스토리"])
+tab_main, tab_hist = st.tabs(["인용 점유율 분석", "히스토리"])
 
 client_gpt, client_gemini = get_clients()
 
