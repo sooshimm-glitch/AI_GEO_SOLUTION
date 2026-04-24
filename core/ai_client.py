@@ -6,6 +6,7 @@ AI 클라이언트 래퍼 v4.2 — import-safe 버전
   - google_search_retrieval 제거 (gemini-2.5 미지원 → 400 오류)
   - Google Search Grounding 타임아웃 n*12초로 확장
   - 브랜드 집계 패턴: 회사 접미사 → 조사 앞 명사로 교체
+  - use_search=False (Search Grounding 비활성화 → 점유율 정상화)
 """
 
 import re
@@ -129,14 +130,10 @@ def call_gpt(client, prompt, system="", model="gpt-4o-mini",
 
 
 # ─────────────────────────────────────────────
-# Gemini 호출 — Google Search Grounding 지원
+# Gemini 호출
 # ─────────────────────────────────────────────
 
 def _make_search_tool(genai):
-    """
-    gemini-2.5 이상: google_search 전용.
-    google_search_retrieval 은 gemini-2.5에서 400 오류 → 사용 안 함.
-    """
     try:
         return [genai.protos.Tool(google_search=genai.protos.GoogleSearch())]
     except Exception:
@@ -145,10 +142,6 @@ def _make_search_tool(genai):
 
 def call_gemini(model_obj, prompt, max_tokens=300, temperature=0.7,
                 tracker=None, use_search=False):
-    """
-    use_search=True: Google Search Grounding 활성화.
-    search 활성화 시 temperature 미지원(API 제약).
-    """
     import google.generativeai as genai
 
     search_tools = _make_search_tool(genai) if use_search else None
@@ -168,8 +161,6 @@ def call_gemini(model_obj, prompt, max_tokens=300, temperature=0.7,
             response = model_obj.generate_content(
                 prompt, generation_config=gen_config)
 
-        # finish_reason=2(MAX_TOKENS)일 때 response.text 가 예외를 던짐
-        # → candidates[0].content.parts 에서 직접 텍스트 추출
         try:
             text = (response.text or "").strip()
         except (ValueError, AttributeError):
@@ -253,17 +244,15 @@ def _strip_markdown(text):
     return text
 
 
-
 def _check_mention(resp, variants):
     rl = resp.lower()
-    return any(v and len(v)>=2 and v.lower() in rl for v in variants)
+    return any(v and len(v) >= 2 and v.lower() in rl for v in variants)
 
 
 def _extract_mentions(resp):
-    if not resp: return {}
+    if not resp:
+        return {}
 
-    # [FIX] 마크다운 제거 후 패턴 매칭
-    # Gemini는 **이케아**처럼 볼드로 응답 → ** 사이에 낀 한국어는 패턴 미탐지
     clean = _strip_markdown(resp)
 
     result = {}
@@ -271,19 +260,19 @@ def _extract_mentions(resp):
     for pat in _KO_BRAND_PATTERNS:
         for m in re.findall(pat, clean, re.MULTILINE):
             b = m.strip() if isinstance(m, str) else m
-            if b and len(b)>=2 and b not in _MENTION_STOPWORDS:
+            if b and len(b) >= 2 and b not in _MENTION_STOPWORDS:
                 found.append(b)
     for m in re.finditer(_EN_BRAND_PATTERN, clean):
         b = m.group(1).strip()
-        if b and len(b)>=3 and b not in _MENTION_STOPWORDS:
+        if b and len(b) >= 3 and b not in _MENTION_STOPWORDS:
             found.append(b)
     for b in found:
-        if b.endswith(_KO_JOSA_ENDINGS) or len(b)<2 or b.isdigit():
+        if b.endswith(_KO_JOSA_ENDINGS) or len(b) < 2 or b.isdigit():
             continue
-        # 너무 긴 매칭(문장 전체) 제외
         if len(b) > 12:
             continue
-        result[b] = {"mentions": result.get(b, {}).get("mentions", 0)+1, "urls": []}
+        result[b] = {"mentions": result.get(b, {}).get("mentions", 0) + 1, "urls": []}
+
     url_pat = r'https?://[^\s\)\]\,]+'
     for u in re.findall(url_pat, resp):
         for b in result:
@@ -294,11 +283,13 @@ def _extract_mentions(resp):
 
 def _merge_mentions(a, b):
     merged = {}
-    for k in set(list(a)+list(b)):
-        ma = a.get(k, {"mentions":0,"urls":[]})
-        mb = b.get(k, {"mentions":0,"urls":[]})
-        merged[k] = {"mentions": ma["mentions"]+mb["mentions"],
-                     "urls": list(set(ma.get("urls",[])+mb.get("urls",[])))}
+    for k in set(list(a) + list(b)):
+        ma = a.get(k, {"mentions": 0, "urls": []})
+        mb = b.get(k, {"mentions": 0, "urls": []})
+        merged[k] = {
+            "mentions": ma["mentions"] + mb["mentions"],
+            "urls": list(set(ma.get("urls", []) + mb.get("urls", [])))
+        }
     return merged
 
 
@@ -308,36 +299,43 @@ def _merge_mentions(a, b):
 
 def _adaptive_batch(call_fn, question, brand_variants, n,
                     early_stop_threshold=0.05, count_mention=False):
-    samples = []; probe_n = min(10, n); probe_hits = 0; all_mentions = {}
+    samples = []
+    probe_n = min(10, n)
+    probe_hits = 0
+    all_mentions = {}
 
     for _ in range(probe_n):
         resp = ""
         with CaptureError("probe", log_level="debug"):
             resp = call_fn(question)
-        if not resp: continue
+        if not resp:
+            continue
         result = detect_citation(resp, brand_variants)
         hit = result.cited or (count_mention and _check_mention(resp, brand_variants))
-        if hit: probe_hits += 1
-        if len(samples)<3 and (result.response_sample or hit):
+        if hit:
+            probe_hits += 1
+        if len(samples) < 3 and (result.response_sample or hit):
             samples.append(result.response_sample or resp[:200])
         all_mentions = _merge_mentions(all_mentions, _extract_mentions(resp))
 
-    probe_rate = probe_hits/probe_n if probe_n>0 else 0
+    probe_rate = probe_hits / probe_n if probe_n > 0 else 0
     lo, hi = wilson_ci(probe_hits, probe_n)
-    if (hi < early_stop_threshold*100) or (lo > (1-early_stop_threshold)*100):
+    if (hi < early_stop_threshold * 100) or (lo > (1 - early_stop_threshold) * 100):
         logger.info(f"조기 종료: rate={probe_rate:.1%}")
-        return probe_hits + round(probe_rate*(n-probe_n)), samples, n, all_mentions
+        return probe_hits + round(probe_rate * (n - probe_n)), samples, n, all_mentions
 
     hits = probe_hits
     for _ in range(n - probe_n):
         resp = ""
         with CaptureError("full", log_level="debug"):
             resp = call_fn(question)
-        if not resp: continue
+        if not resp:
+            continue
         result = detect_citation(resp, brand_variants)
         hit = result.cited or (count_mention and _check_mention(resp, brand_variants))
-        if hit: hits += 1
-        if len(samples)<3 and (result.response_sample or hit):
+        if hit:
+            hits += 1
+        if len(samples) < 3 and (result.response_sample or hit):
             samples.append(result.response_sample or resp[:200])
         all_mentions = _merge_mentions(all_mentions, _extract_mentions(resp))
 
@@ -368,14 +366,13 @@ def run_simulation(client_gpt, client_gemini, question, target_url, model_gpt,
                         model=model_gpt, temperature=0.7, tracker=tracker)
 
     def _gem_call(q):
-    return call_gemini(client_gemini, q, max_tokens=1024,
-                       temperature=0.7, tracker=tracker, use_search=False)
+        return call_gemini(client_gemini, q, max_tokens=1024,
+                           temperature=0.7, tracker=tracker, use_search=False)
 
-    gpt_hits=0; gpt_samples=[]; gpt_n=0; gpt_ran=False; gpt_comp={}
-    gem_hits=0; gem_samples=[]; gem_n=0; gem_ran=False; gem_comp={}
+    gpt_hits = 0; gpt_samples = []; gpt_n = 0; gpt_ran = False; gpt_comp = {}
+    gem_hits = 0; gem_samples = []; gem_n = 0; gem_ran = False; gem_comp = {}
 
-    # Google Search Grounding 활성화 시 호출당 5~15초 → 타임아웃 충분히 확보
-    timeout = max(300, n * 12)
+    timeout = max(120, n * 4)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
         futures = {}
@@ -401,12 +398,12 @@ def run_simulation(client_gpt, client_gemini, question, target_url, model_gpt,
                 logger.warning(f"Gemini simulation failed: {ctx.error}")
 
     merged_comp = _merge_mentions(gpt_comp, gem_comp)
-    gpt_rate  = round(gpt_hits/gpt_n*100,1) if gpt_ran and gpt_n>0 else None
-    gem_rate  = round(gem_hits/gem_n*100,1) if gem_ran and gem_n>0 else None
-    valid     = [v for v in [gpt_rate, gem_rate] if v is not None]
-    avg_rate  = round(sum(valid)/len(valid),1) if valid else None
-    gpt_ci    = wilson_ci(gpt_hits, gpt_n) if gpt_ran and gpt_n>0 else (None,None)
-    gem_ci    = wilson_ci(gem_hits, gem_n) if gem_ran and gem_n>0 else (None,None)
+    gpt_rate = round(gpt_hits / gpt_n * 100, 1) if gpt_ran and gpt_n > 0 else None
+    gem_rate = round(gem_hits / gem_n * 100, 1) if gem_ran and gem_n > 0 else None
+    valid    = [v for v in [gpt_rate, gem_rate] if v is not None]
+    avg_rate = round(sum(valid) / len(valid), 1) if valid else None
+    gpt_ci   = wilson_ci(gpt_hits, gpt_n) if gpt_ran and gpt_n > 0 else (None, None)
+    gem_ci   = wilson_ci(gem_hits, gem_n) if gem_ran and gem_n > 0 else (None, None)
 
     result = SimResult(
         gpt_rate=gpt_rate, gemini_rate=gem_rate, avg_rate=avg_rate,
@@ -432,22 +429,24 @@ def run_all_simulations(client_gpt, client_gemini, questions, target_url,
     def _empty():
         return SimResult(gpt_rate=None, gemini_rate=None, avg_rate=None,
                          gpt_hits=None, gemini_hits=None,
-                         n=n, gpt_ci=(None,None), gemini_ci=(None,None))
+                         n=n, gpt_ci=(None, None), gemini_ci=(None, None))
 
     results = [None] * len(questions)
 
     def _one(idx, question):
         try:
-            results[idx] = run_simulation(client_gpt, client_gemini, question,
-                                          target_url, model_gpt, n=n,
-                                          biz_info=biz_info, tracker=tracker,
-                                          use_cache=use_cache)
+            results[idx] = run_simulation(
+                client_gpt, client_gemini, question,
+                target_url, model_gpt, n=n,
+                biz_info=biz_info, tracker=tracker,
+                use_cache=use_cache,
+            )
         except Exception as e:
             logger.warning(f"[sim_q{idx}] 오류: {e}")
             results[idx] = _empty()
 
-    collect_timeout = max(420, n * 15)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(questions),5)) as ex:
+    collect_timeout = max(300, n * 10)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(questions), 5)) as ex:
         futs = {ex.submit(_one, i, q): i for i, q in enumerate(questions)}
         for fut in concurrent.futures.as_completed(futs):
             with CaptureError("collect", log_level="warning"):
