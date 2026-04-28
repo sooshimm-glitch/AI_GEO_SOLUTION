@@ -1,21 +1,25 @@
 """
-AI Citation Analyzer v3.1 — 통합형
+AI Citation Analyzer v4.0 — 통합형 + 6기능 확장
 
-수정 사항:
-1. render_strategy — 블루오션 키워드 섹션 추가 (기존에 keywords 필드는 있었으나 표시 누락)
-2. render_strategy — competitor_mentions 집계 데이터를 fallback으로 활용
-   (strategy 분석에서 competitors 빈 경우 시뮬레이션 집계 결과 표시)
-3. run_btn 블록 — sim_results 에서 competitor_mentions 집계 후 render_strategy 에 전달
-4. render_strategy 시그니처: sim_mentions 파라미터 추가
+추가 기능:
+1. Google Sheets 인용율 추이 트래킹
+2. 경쟁사 직접 비교 분석 (병렬 시뮬레이션 + 그룹 바 차트)
+3. AI 질문 추천 엔진 (GPT/Gemini → 8개 추천 → 체크박스 선택)
+4. PDF 리포트 자동 생성 (reportlab, 한글 폰트)
+7. AI 응답 원문 표시 + 감성 분류
+9. 콘텐츠 GEO 점수 편집기 (0-100점, 레이더 차트)
 """
 
 import streamlit as st
 import datetime
 import re
 import time
+import json
+import io
 import pandas as pd
 import plotly.graph_objects as go
 from urllib.parse import urlparse
+import concurrent.futures as cf
 
 import sys, os
 _APP_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -27,7 +31,7 @@ try:
     from core.cache import get_cache
     from core.logger import get_logger, CaptureError
     from core.citation import build_brand_variants
-    from core.ai_client import run_all_simulations, CostTracker, SimResult
+    from core.ai_client import run_all_simulations, CostTracker, SimResult, call_gpt, call_gemini
     from core.biz_analysis import run_strategy_analysis, BusinessInfo
 except ImportError as _e:
     import streamlit as st
@@ -35,6 +39,23 @@ except ImportError as _e:
     st.error(f"**core 모듈 import 실패**: {_e}")
     st.code(f"APP_ROOT: {_APP_ROOT}\nCWD: {os.getcwd()}\ncore/ 존재: {os.path.isdir(os.path.join(_APP_ROOT, 'core'))}")
     st.stop()
+
+# Optional dependencies
+try:
+    import gspread
+    _GSPREAD_OK = True
+except ImportError:
+    _GSPREAD_OK = False
+
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib import colors as rl_colors
+    from reportlab.lib.units import cm as rl_cm
+    _REPORTLAB_OK = True
+except ImportError:
+    _REPORTLAB_OK = False
 
 logger = get_logger("app")
 
@@ -45,13 +66,37 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-if "dark_mode"      not in st.session_state: st.session_state["dark_mode"]      = False
-if "cache_data"     not in st.session_state: st.session_state["cache_data"]     = {}
-if "cost_tracker"   not in st.session_state: st.session_state["cost_tracker"]   = CostTracker()
-if "history"        not in st.session_state: st.session_state["history"]        = []
-if "run_demo"       not in st.session_state: st.session_state["run_demo"]       = False
-if "q_count"        not in st.session_state: st.session_state["q_count"]        = 1
-if "questions_list" not in st.session_state: st.session_state["questions_list"] = [""]
+# ── Session state ──────────────────────────────────────────────────────────────
+_SS_DEFAULTS = {
+    "dark_mode":       False,
+    "cache_data":      {},
+    "cost_tracker":    CostTracker(),
+    "history":         [],
+    "run_demo":        False,
+    "q_count":         1,
+    "questions_list":  [""],
+    # 기능 3
+    "recommended_qs":  [],
+    "show_rec_qs":     False,
+    # 기능 2
+    "comp_urls":       ["", "", ""],
+    "comp_brands":     ["", "", ""],
+    "comp_results":    {},
+    # 기능 4 / 7 / 9 persistence
+    "last_all_results":  [],
+    "last_strategy":     None,
+    "last_questions":    [],
+    "last_url":          "",
+    "last_brand":        "",
+    "last_sim_mentions": {},
+    "geo_editor_result": None,
+    # 기능 1
+    "gsheets_url":       "",
+    "sa_json_str":       "",
+}
+for _k, _v in _SS_DEFAULTS.items():
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
 
 _cache = get_cache()
 if st.session_state["cache_data"]:
@@ -184,6 +229,8 @@ details summary::marker{{display:none!important}}
 """, unsafe_allow_html=True)
 
 
+# ── Utilities ──────────────────────────────────────────────────────────────────
+
 def normalize_url(url: str) -> str:
     if not url.startswith("http"):
         url = "https://" + url
@@ -201,7 +248,6 @@ def save_cache():
         st.session_state["cache_data"] = _cache.to_serializable()
 
 def _aggregate_sim_mentions(all_results: list) -> dict:
-    """sim_results 의 competitor_mentions 를 브랜드별로 집계."""
     merged: dict = {}
     for r in all_results:
         comp_m = (
@@ -217,6 +263,459 @@ def _aggregate_sim_mentions(all_results: list) -> dict:
                 merged[brand]["urls"] = list(set(merged[brand]["urls"] + data.get("urls", [])))
     return merged
 
+
+# ── 기능 1: Google Sheets ──────────────────────────────────────────────────────
+
+def _get_gsheets_client(sa_json_str: str):
+    if not _GSPREAD_OK or not sa_json_str.strip():
+        return None
+    with CaptureError("gsheets_client", log_level="warning"):
+        sa_info = json.loads(sa_json_str)
+        return gspread.service_account_from_dict(sa_info)
+    return None
+
+def save_to_gsheets(gc, sheet_url: str, brand: str, domain: str,
+                    questions: list, all_results: list) -> bool:
+    if not gc or not sheet_url.strip():
+        return False
+    with CaptureError("gsheets_save", log_level="warning") as ctx:
+        sh = gc.open_by_url(sheet_url)
+        ws = sh.sheet1
+        existing = ws.get_all_values()
+        if not existing:
+            ws.append_row(["timestamp", "brand", "domain", "question",
+                           "gpt_rate", "gemini_rate", "avg_rate"])
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        rows = []
+        for q, r in zip(questions, all_results):
+            _g = lambda k, rr=r: (rr.get(k) if isinstance(rr, dict) else getattr(rr, k, None)) or 0
+            rows.append([ts, brand, domain, q,
+                         round(_g("gpt_rate"), 2),
+                         round(_g("gemini_rate"), 2),
+                         round(_g("avg_rate"), 2)])
+        ws.append_rows(rows)
+    return ctx.ok
+
+def load_from_gsheets(gc, sheet_url: str) -> list:
+    if not gc or not sheet_url.strip():
+        return []
+    with CaptureError("gsheets_load", log_level="warning"):
+        sh = gc.open_by_url(sheet_url)
+        ws = sh.sheet1
+        return ws.get_all_records()
+    return []
+
+def render_gsheets_trend(records: list, brand: str):
+    if not records:
+        return
+    df = pd.DataFrame(records)
+    if "brand" in df.columns:
+        df = df[df["brand"].astype(str) == brand]
+    if df.empty:
+        st.caption("저장된 데이터가 없습니다.")
+        return
+    for col in ["gpt_rate", "gemini_rate", "avg_rate"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    fig = go.Figure()
+    if "avg_rate" in df.columns and "timestamp" in df.columns:
+        fig.add_trace(go.Scatter(
+            x=df["timestamp"], y=df["avg_rate"],
+            mode="lines+markers", name="평균 인용율",
+            line=dict(color="#555555", width=2),
+            marker=dict(size=6),
+        ))
+    if "gpt_rate" in df.columns and "timestamp" in df.columns:
+        fig.add_trace(go.Scatter(
+            x=df["timestamp"], y=df["gpt_rate"],
+            mode="lines+markers", name="GPT",
+            line=dict(color="#888888", dash="dot"),
+        ))
+    fig.update_layout(
+        title=dict(text=f"{brand} 인용율 추이 (Google Sheets)", font=dict(size=14, color=_plot_font), x=0),
+        plot_bgcolor=_plot_bg, paper_bgcolor=_plot_paper,
+        font=dict(family="Plus Jakarta Sans", color=_plot_font),
+        xaxis=dict(tickfont=dict(size=9, color=_plot_font), gridcolor=_plot_grid),
+        yaxis=dict(title="인용율 (%)", ticksuffix="%", gridcolor=_plot_grid, tickfont=dict(color=_plot_font)),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(color=_plot_font)),
+        margin=dict(t=50, b=40, l=50, r=20), height=280,
+    )
+    _chart_counter["n"] += 1
+    st.plotly_chart(fig, use_container_width=True, key=f"gs_trend_{_chart_counter['n']}")
+
+
+# ── 기능 2: Competitor Comparison ─────────────────────────────────────────────
+
+def run_competitor_comparison(client_gpt, client_gemini, urls: list, brands: list,
+                               questions: list, n: int, model_gpt: str, tracker) -> dict:
+    results: dict = {}
+
+    def _run_one(url: str, brand: str):
+        biz = {"brand_name": brand, "industry": "", "industry_category": "기타",
+               "core_product": "", "target_audience": "잠재 고객"}
+        return run_all_simulations(
+            client_gpt, client_gemini, questions, url,
+            model_gpt=model_gpt, n=n, biz_info=biz,
+            tracker=tracker, use_cache=True,
+        )
+
+    pairs = [(u.strip(), b.strip()) for u, b in zip(urls, brands) if u.strip() and b.strip()]
+    if not pairs:
+        return results
+
+    _ex = cf.ThreadPoolExecutor(max_workers=min(len(pairs), 3))
+    try:
+        futs = {_ex.submit(_run_one, u, b): (u, b) for u, b in pairs}
+        done, pending = cf.wait(futs, timeout=360)
+        for fut in done:
+            _, brand = futs[fut]
+            with CaptureError(f"comp_sim_{brand}", log_level="warning"):
+                results[brand] = fut.result()
+        for fut in pending:
+            fut.cancel()
+            _, brand = futs[fut]
+            results[brand] = []
+    finally:
+        _ex.shutdown(wait=False)
+
+    return results
+
+def render_competitor_bar_chart(comp_results: dict, questions: list):
+    if not comp_results or not questions:
+        return
+    short_q = [q[:18] + "..." if len(q) > 20 else q for q in questions]
+    _colors = ["#111111", "#444444", "#777777", "#AAAAAA", "#CCCCCC"]
+    fig = go.Figure()
+    for i, (brand, res_list) in enumerate(comp_results.items()):
+        avgs = []
+        for r in (res_list or [])[:len(questions)]:
+            v = (r.get("avg_rate") if isinstance(r, dict) else getattr(r, "avg_rate", None)) or 0
+            avgs.append(v)
+        while len(avgs) < len(questions):
+            avgs.append(0)
+        fig.add_trace(go.Bar(
+            name=brand, x=short_q, y=avgs,
+            marker=dict(color=_colors[i % len(_colors)]),
+            text=[f"{v:.1f}%" for v in avgs],
+            textposition="outside", textfont=dict(color=_plot_font),
+        ))
+    fig.update_layout(
+        title=dict(text="경쟁사 AI 인용 점유율 비교", font=dict(size=16, color=_plot_font), x=0),
+        barmode="group", bargap=0.2,
+        plot_bgcolor=_plot_bg, paper_bgcolor=_plot_paper,
+        font=dict(family="Plus Jakarta Sans", color=_plot_font),
+        xaxis=dict(tickfont=dict(size=10, color=_plot_font), gridcolor=_plot_grid),
+        yaxis=dict(title="인용 점유율 (%)", ticksuffix="%", gridcolor=_plot_grid,
+                   tickfont=dict(color=_plot_font)),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+                    font=dict(color=_plot_font)),
+        margin=dict(t=60, b=40, l=50, r=20), height=380,
+    )
+    _chart_counter["n"] += 1
+    st.plotly_chart(fig, use_container_width=True, key=f"comp_chart_{_chart_counter['n']}")
+
+
+# ── 기능 3: Question Recommendation ──────────────────────────────────────────
+
+_REC_SYSTEM = "당신은 GEO 전문가입니다. 완성된 질문만 출력합니다."
+
+def recommend_questions(url: str, brand_name: str, client_gpt, client_gemini, model_gpt: str) -> list:
+    domain = extract_domain(url) if url else (brand_name or "서비스")
+    prompt = f"""다음 사이트/브랜드의 AI 검색 점유율 분석에 효과적인 질문 8개를 추천하세요.
+
+사이트 도메인: {domain}
+브랜드명: {brand_name}
+
+규칙:
+1. 실제 사용자가 네이버·구글·ChatGPT 검색창에 입력하는 자연스러운 질문
+2. 브랜드명·도메인 주소를 질문에 절대 포함하지 말 것
+3. 구매 결정 5단계(인지·비교·신뢰·가격·전환) 중 다양하게 포함
+4. 번호·기호 없이 질문 8개만, 한 줄에 하나, 물음표(?)로 끝낼 것"""
+
+    result_str = ""
+    with CaptureError("rec_qs", log_level="warning"):
+        if client_gpt:
+            result_str = call_gpt(client_gpt, prompt, system=_REC_SYSTEM,
+                                  max_tokens=700, model=model_gpt, temperature=0.9)
+        elif client_gemini:
+            result_str = call_gemini(client_gemini, prompt, max_tokens=700, temperature=0.9)
+
+    qs: list = []
+    for ln in result_str.split("\n"):
+        ln = ln.strip()
+        if not ln:
+            continue
+        clean = re.sub(r"^\d+[.)]\s*", "", ln)
+        clean = re.sub(r"^[-•*]\s*", "", clean).strip()
+        if len(clean) > 10:
+            if not clean.endswith("?"):
+                clean += "?"
+            qs.append(clean)
+    return qs[:8]
+
+
+# ── 기능 4: PDF Report ────────────────────────────────────────────────────────
+
+def _get_pdf_font() -> str:
+    if not _REPORTLAB_OK:
+        return "Helvetica"
+    try:
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+        candidates = [
+            ("C:/Windows/Fonts/malgun.ttf",  "MalgunGothic"),
+            ("C:/Windows/Fonts/NanumGothic.ttf", "NanumGothic"),
+            ("/usr/share/fonts/truetype/nanum/NanumGothic.ttf", "NanumGothic"),
+            (os.path.join(_APP_ROOT, "fonts", "NanumGothic.ttf"), "NanumGothic"),
+        ]
+        for path, name in candidates:
+            if os.path.exists(path):
+                pdfmetrics.registerFont(TTFont(name, path))
+                return name
+    except Exception:
+        pass
+    return "Helvetica"
+
+def generate_pdf(brand_name: str, target_url: str, questions: list,
+                 all_results: list, strategy: dict) -> bytes:
+    if not _REPORTLAB_OK:
+        return b""
+    buf = io.BytesIO()
+    try:
+        doc = SimpleDocTemplate(buf, pagesize=A4,
+                                rightMargin=2*rl_cm, leftMargin=2*rl_cm,
+                                topMargin=2*rl_cm, bottomMargin=2*rl_cm)
+        fn = _get_pdf_font()
+        styles = getSampleStyleSheet()
+        s_title = ParagraphStyle("T", parent=styles["Title"], fontName=fn, fontSize=20, spaceAfter=6)
+        s_sub   = ParagraphStyle("S", parent=styles["Normal"], fontName=fn, fontSize=9,
+                                 textColor=rl_colors.grey, spaceAfter=4)
+        s_h2    = ParagraphStyle("H2", parent=styles["Heading2"], fontName=fn, fontSize=13, spaceAfter=4)
+        s_body  = ParagraphStyle("B", parent=styles["Normal"], fontName=fn, fontSize=9, leading=14)
+
+        story = [
+            Paragraph("AI Citation Analysis Report", s_title),
+            Paragraph(f"Brand: {brand_name}  |  {target_url}", s_sub),
+            Paragraph(f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}", s_sub),
+            Spacer(1, 0.6*rl_cm),
+            Paragraph("Citation Rate by Question", s_h2),
+        ]
+
+        tdata = [["Question", "GPT %", "Gemini %", "Avg %"]]
+        for q, r in zip(questions, all_results):
+            _g = lambda k, rr=r: (rr.get(k) if isinstance(rr, dict) else getattr(rr, k, None)) or 0
+            tdata.append([
+                (q[:55] + "...") if len(q) > 58 else q,
+                f"{_g('gpt_rate'):.1f}%",
+                f"{_g('gemini_rate'):.1f}%",
+                f"{_g('avg_rate'):.1f}%",
+            ])
+        tbl = Table(tdata, colWidths=[10*rl_cm, 2.3*rl_cm, 2.3*rl_cm, 2.3*rl_cm])
+        tbl.setStyle(TableStyle([
+            ("BACKGROUND",    (0, 0), (-1,  0), rl_colors.HexColor("#333333")),
+            ("TEXTCOLOR",     (0, 0), (-1,  0), rl_colors.white),
+            ("FONTNAME",      (0, 0), (-1, -1), fn),
+            ("FONTSIZE",      (0, 0), (-1, -1), 8),
+            ("GRID",          (0, 0), (-1, -1), 0.5, rl_colors.HexColor("#CCCCCC")),
+            ("ROWBACKGROUNDS",(0, 1), (-1, -1),
+             [rl_colors.white, rl_colors.HexColor("#F5F5F5")]),
+            ("ALIGN",         (1, 0), (-1, -1), "CENTER"),
+        ]))
+        story.append(tbl)
+        story.append(Spacer(1, 0.5*rl_cm))
+
+        if strategy:
+            diags = strategy.get("diagnoses", [])
+            if diags:
+                story.append(Paragraph("Diagnosis", s_h2))
+                for d in diags[:3]:
+                    story.append(Paragraph(f"• {d}", s_body))
+                story.append(Spacer(1, 0.3*rl_cm))
+
+            kws = strategy.get("keywords", [])
+            if kws:
+                story.append(Paragraph("Blue Ocean Keywords", s_h2))
+                for kw in kws[:5]:
+                    kw_text = kw.get("keyword", str(kw)) if isinstance(kw, dict) else str(kw)
+                    story.append(Paragraph(f"• {kw_text}", s_body))
+                story.append(Spacer(1, 0.3*rl_cm))
+
+            guides = strategy.get("geo_guides", [])
+            if guides:
+                story.append(Paragraph("GEO Optimization Guide", s_h2))
+                for g in guides[:5]:
+                    clean_g = re.sub(r"\*\*(.*?)\*\*", r"\1", g)
+                    story.append(Paragraph(f"• {clean_g[:250]}", s_body))
+
+        doc.build(story)
+    except Exception as e:
+        logger.warning(f"PDF build error: {e}")
+        return b""
+    return buf.getvalue()
+
+
+# ── 기능 7: Sentiment & Highlight ─────────────────────────────────────────────
+
+_POS_KW = ["추천", "좋은", "우수", "최고", "효과적", "편리", "만족", "탁월", "뛰어난", "강력",
+           "최적", "선도", "인정", "신뢰", "안정"]
+_NEG_KW = ["단점", "문제", "불편", "비싼", "어려운", "느린", "실패", "부족", "아쉬운", "낮은",
+           "부정적", "위험", "취약", "불만", "단순"]
+
+def classify_sentiment(text: str, brand_name: str) -> str:
+    if not text:
+        return "미언급"
+    variants = build_brand_variants(brand_name) if brand_name else []
+    mentioned = any(v and v.lower() in text.lower() for v in variants)
+    p = sum(1 for kw in _POS_KW if kw in text)
+    n = sum(1 for kw in _NEG_KW if kw in text)
+    if not mentioned:
+        return "미언급"
+    if p > n:
+        return "긍정"
+    if n > p:
+        return "부정"
+    return "중립"
+
+def highlight_brand(text: str, variants: list) -> str:
+    if not text or not variants:
+        return text
+    for v in variants:
+        if not v:
+            continue
+        try:
+            text = re.sub(
+                re.escape(v),
+                f'<mark style="background:#F59E0B;color:#111;padding:0 3px;border-radius:3px;">{v}</mark>',
+                text, flags=re.IGNORECASE,
+            )
+        except Exception:
+            pass
+    return text
+
+
+# ── 기능 9: GEO Editor ────────────────────────────────────────────────────────
+
+_GEO_DIMS = {
+    "brand_clarity":     "브랜드 명확성",
+    "faq_structure":     "FAQ 구조",
+    "specificity":       "구체성·수치",
+    "authority_signals": "권위 신호",
+    "keyword_density":   "키워드 밀도",
+}
+
+_GEO_SYSTEM = "당신은 GEO(Generative Engine Optimization) 전문가입니다. JSON만 출력합니다."
+
+def run_geo_editor_analysis(content_text: str, brand_name: str,
+                             client_gpt, client_gemini, model_gpt: str) -> dict:
+    prompt = f"""아래 콘텐츠를 GEO 관점에서 5개 항목 각 0-20점으로 평가해주세요.
+
+브랜드명: {brand_name}
+
+[콘텐츠]
+{content_text[:3000]}
+
+JSON 형식으로만 출력 (설명 없음):
+{{
+  "brand_clarity":     {{"score": 0-20, "feedback": "한 줄 피드백"}},
+  "faq_structure":     {{"score": 0-20, "feedback": "한 줄 피드백"}},
+  "specificity":       {{"score": 0-20, "feedback": "한 줄 피드백"}},
+  "authority_signals": {{"score": 0-20, "feedback": "한 줄 피드백"}},
+  "keyword_density":   {{"score": 0-20, "feedback": "한 줄 피드백"}},
+  "improvement":       "전체 개선 제안 200자 이내",
+  "rewritten_sample":  "개선된 첫 단락 샘플 (200자 이내)"
+}}"""
+
+    result_str = ""
+    with CaptureError("geo_editor", log_level="warning"):
+        if client_gpt:
+            result_str = call_gpt(client_gpt, prompt, system=_GEO_SYSTEM,
+                                  max_tokens=1000, model=model_gpt, temperature=0.2)
+        elif client_gemini:
+            result_str = call_gemini(client_gemini, prompt, max_tokens=1000, temperature=0.2)
+
+    with CaptureError("geo_parse", log_level="warning"):
+        m = re.search(r"\{.*\}", result_str, re.DOTALL)
+        if m:
+            return json.loads(m.group())
+
+    return {d: {"score": 10, "feedback": "분석 실패"} for d in _GEO_DIMS} | {
+        "improvement": "API 키를 확인하세요.",
+        "rewritten_sample": "",
+    }
+
+def render_geo_radar(geo_result: dict):
+    vals   = [geo_result.get(k, {}).get("score", 0) if isinstance(geo_result.get(k), dict)
+              else int(geo_result.get(k, 0)) for k in _GEO_DIMS]
+    labels = list(_GEO_DIMS.values())
+    total  = sum(vals)
+
+    col_r, col_s = st.columns([3, 2])
+    with col_r:
+        fig = go.Figure(go.Scatterpolar(
+            r=vals + [vals[0]],
+            theta=labels + [labels[0]],
+            fill="toself",
+            line=dict(color="#555555", width=2),
+            fillcolor="rgba(80,80,80,0.25)",
+        ))
+        fig.update_layout(
+            polar=dict(
+                radialaxis=dict(visible=True, range=[0, 20],
+                                tickfont=dict(size=9, color=_plot_font),
+                                gridcolor=_plot_grid),
+                angularaxis=dict(tickfont=dict(size=11, color=_plot_font)),
+                bgcolor=_plot_paper,
+            ),
+            plot_bgcolor=_plot_bg, paper_bgcolor=_plot_paper,
+            font=dict(family="Plus Jakarta Sans", color=_plot_font),
+            margin=dict(t=30, b=30, l=30, r=30), height=320,
+        )
+        _chart_counter["n"] += 1
+        st.plotly_chart(fig, use_container_width=True, key=f"geo_radar_{_chart_counter['n']}")
+
+    with col_s:
+        score_color = "#10B981" if total >= 80 else "#F59E0B" if total >= 50 else "#EF4444"
+        st.markdown(f"""
+        <div style="text-align:center;padding:20px 10px;">
+            <div style="font-size:3rem;font-weight:800;color:{score_color};">{total}</div>
+            <div style="font-size:.85rem;color:{_text_muted};margin-bottom:16px;">/ 100점</div>
+        </div>""", unsafe_allow_html=True)
+        for dim_key, dim_label in _GEO_DIMS.items():
+            dim_val = geo_result.get(dim_key, {})
+            sc  = dim_val.get("score", 0) if isinstance(dim_val, dict) else 0
+            fb  = dim_val.get("feedback", "") if isinstance(dim_val, dict) else ""
+            bar_w = int(sc / 20 * 100)
+            bar_c = "#10B981" if sc >= 15 else "#F59E0B" if sc >= 8 else "#EF4444"
+            st.markdown(f"""
+            <div style="margin-bottom:8px;">
+                <div style="display:flex;justify-content:space-between;font-size:.78rem;">
+                    <span style="font-weight:600;color:{_text};">{dim_label}</span>
+                    <span style="color:{bar_c};font-weight:700;">{sc}/20</span>
+                </div>
+                <div style="background:{_border};border-radius:4px;height:6px;margin:3px 0;">
+                    <div style="background:{bar_c};width:{bar_w}%;height:6px;border-radius:4px;"></div>
+                </div>
+                <div style="font-size:.72rem;color:{_text_muted};">{fb}</div>
+            </div>""", unsafe_allow_html=True)
+
+    improvement = geo_result.get("improvement", "")
+    rewritten   = geo_result.get("rewritten_sample", "")
+    if improvement:
+        st.markdown(f"""
+        <div style="background:{_bg2};border-left:3px solid #F59E0B;border-radius:8px;padding:12px 16px;margin-top:10px;">
+            <div style="font-size:.8rem;font-weight:700;color:{_text_muted};margin-bottom:4px;">개선 제안</div>
+            <div style="font-size:.87rem;color:{_text};line-height:1.7;">{improvement}</div>
+        </div>""", unsafe_allow_html=True)
+    if rewritten:
+        st.markdown(f"""
+        <div style="background:{_card};border:1px solid {_border};border-radius:8px;padding:12px 16px;margin-top:10px;">
+            <div style="font-size:.8rem;font-weight:700;color:{_text_muted};margin-bottom:4px;">개선 샘플</div>
+            <div style="font-size:.87rem;color:{_text};line-height:1.7;">{rewritten}</div>
+        </div>""", unsafe_allow_html=True)
+
+
+# ── Demo data ──────────────────────────────────────────────────────────────────
 
 _DEMO_SCENARIOS = {
     "naver.com": {
@@ -280,6 +779,9 @@ def get_demo(url: str) -> dict:
 
 _chart_counter = {"n": 0}
 
+
+# ── Charts ─────────────────────────────────────────────────────────────────────
+
 def render_bar_chart(results: list, questions: list, title: str = "AI 엔진별 인용 점유율"):
     if not results:
         return
@@ -327,13 +829,9 @@ def render_bar_chart(results: list, questions: list, title: str = "AI 엔진별 
     st.plotly_chart(fig, use_container_width=True, key=f'chart_{_chart_counter["n"]}')
 
 
-def render_strategy(strategy: dict, target_url: str, sim_mentions: dict = None):
-    """
-    전략 분석 결과 렌더링.
+# ── render_strategy ────────────────────────────────────────────────────────────
 
-    sim_mentions: run_all_simulations 의 competitor_mentions 집계 결과.
-                  strategy.competitors 가 비어있을 때 fallback 으로 사용.
-    """
+def render_strategy(strategy: dict, target_url: str, sim_mentions: dict = None):
     domain = extract_domain(target_url)
     sim_mentions = sim_mentions or {}
 
@@ -343,31 +841,24 @@ def render_strategy(strategy: dict, target_url: str, sim_mentions: dict = None):
         "틈새전문":"#6366F1","틈새 전문":"#6366F1",
     }
 
-    # ── AI 인용 경쟁 현황 (TOP 5) ──
     st.markdown("### 🏆 AI 인용 경쟁 현황 (TOP 5)")
 
     competitors = strategy.get("competitors", [])[:5]
 
-    # FIX: competitors 빈 경우 sim_mentions 집계 결과로 fallback
     if not competitors and sim_mentions:
-        sorted_m = sorted(
-            sim_mentions.items(),
-            key=lambda x: x[1].get("mentions", 0),
-            reverse=True
-        )[:5]
+        sorted_m = sorted(sim_mentions.items(),
+                          key=lambda x: x[1].get("mentions", 0), reverse=True)[:5]
         competitors = [
             {
                 "rank": i + 1,
                 "brand_name": brand,
                 "domain": next(
-                    (u.split("/")[2] for u in data.get("urls", []) if u.startswith("http")),
-                    ""
+                    (u.split("/")[2] for u in data.get("urls", []) if u.startswith("http")), ""
                 ),
                 "reason": f"AI 응답 {data.get('mentions', 0)}회 언급",
                 "position": ["업계1위", "신흥강자", "신흥강자", "틈새전문", "틈새전문"][i],
             }
-            for i, (brand, data) in enumerate(sorted_m)
-            if brand
+            for i, (brand, data) in enumerate(sorted_m) if brand
         ]
         if competitors:
             st.caption("시뮬레이션 AI 응답에서 집계된 언급 기준 (전략 분석 보완)")
@@ -416,7 +907,6 @@ def render_strategy(strategy: dict, target_url: str, sim_mentions: dict = None):
         unsafe_allow_html=True,
     )
 
-    # ── 인용 실패 원인 진단 ──
     st.markdown("### 🔬 인용 실패 원인 진단")
     _icons = ["❌", "⚡", "🔧"]
     for i, d in enumerate(strategy.get("diagnoses", [])):
@@ -431,7 +921,6 @@ def render_strategy(strategy: dict, target_url: str, sim_mentions: dict = None):
         unsafe_allow_html=True,
     )
 
-    # ── 블루오션 키워드 (신규 섹션) ──
     st.markdown("### 🌊 블루오션 키워드")
     keywords = strategy.get("keywords", [])
     if keywords:
@@ -453,7 +942,6 @@ def render_strategy(strategy: dict, target_url: str, sim_mentions: dict = None):
         unsafe_allow_html=True,
     )
 
-    # ── GEO 최적화 가이드 ──
     st.markdown("### 📋 GEO 최적화 가이드")
     geo_guides = strategy.get("geo_guides", [])
     if geo_guides:
@@ -475,12 +963,14 @@ def render_strategy(strategy: dict, target_url: str, sim_mentions: dict = None):
         st.caption("GEO 가이드를 생성하지 못했습니다.")
 
 
+# ── Sidebar ────────────────────────────────────────────────────────────────────
+
 with st.sidebar:
     st.markdown("""
     <div class="sidebar-logo">
         <span class="logo-icon">🔍</span>
         <h2>AI Citation Analyzer</h2>
-        <p>v3.1 - 통합 분석</p>
+        <p>v4.0 - 통합 분석</p>
     </div>""", unsafe_allow_html=True)
 
     if st.button("🌙 다크 모드" if not _dark else "☀️ 라이트 모드", key="btn_dark", use_container_width=True):
@@ -537,6 +1027,38 @@ with st.sidebar:
         st.session_state["run_demo"] = True
         st.rerun()
 
+    # ── 기능 1: Google Sheets 연동 ──
+    st.markdown("---")
+    st.markdown("""<div style="font-size:.82rem;font-weight:700;color:rgba(255,255,255,.85);margin-bottom:6px;">
+        📊 Google Sheets 연동</div>""", unsafe_allow_html=True)
+
+    gs_sa = st.text_area(
+        "Service Account JSON",
+        value=st.session_state.get("sa_json_str", ""),
+        placeholder='{"type":"service_account","project_id":"..."}',
+        height=80, key="sa_json_input",
+        help="GCP 서비스 계정 JSON 키를 붙여넣으세요",
+    )
+    st.session_state["sa_json_str"] = gs_sa
+
+    gs_url = st.text_input(
+        "Sheet URL",
+        value=st.session_state.get("gsheets_url", ""),
+        placeholder="https://docs.google.com/spreadsheets/d/...",
+        key="gsheets_url_input",
+    )
+    st.session_state["gsheets_url"] = gs_url
+
+    if gs_sa.strip() and gs_url.strip():
+        if _GSPREAD_OK:
+            st.markdown("""<div style="font-size:.72rem;color:#10B981;">🟢 연동 준비됨 (분석 후 자동 저장)</div>""",
+                        unsafe_allow_html=True)
+        else:
+            st.markdown("""<div style="font-size:.72rem;color:#F59E0B;">⚠️ gspread 패키지 미설치</div>""",
+                        unsafe_allow_html=True)
+
+
+# ── Clients ────────────────────────────────────────────────────────────────────
 
 def get_clients():
     client_gpt = client_gemini = None
@@ -551,6 +1073,8 @@ def get_clients():
             client_gemini = genai.GenerativeModel(gemini_model_name)
     return client_gpt, client_gemini
 
+
+# ── Header ─────────────────────────────────────────────────────────────────────
 
 st.markdown("""
 <div style="background:linear-gradient(135deg,#111111,#1e1e1e,#2a2a2a);border-radius:20px;padding:36px 40px;margin-bottom:28px;box-shadow:0 4px 24px rgba(0,0,0,.4);">
@@ -572,6 +1096,8 @@ tab_main, tab_hist = st.tabs(["인용 점유율 분석", "히스토리"])
 
 client_gpt, client_gemini = get_clients()
 
+# ── Tab: 분석 ──────────────────────────────────────────────────────────────────
+
 with tab_main:
 
     st.markdown(f"""
@@ -591,6 +1117,119 @@ with tab_main:
     if brand_input.strip():
         st.caption("브랜드명은 AI 응답 집계에 직접 반영됩니다. 정확한 브랜드명을 입력해주세요.")
 
+    # ── 기능 2: 경쟁사 비교 분석 ──────────────────────────────────────────────
+    with st.expander("🆚 경쟁사 비교 분석 (선택)", expanded=False):
+        st.caption("비교할 경쟁사 URL과 브랜드명을 입력하면 동일 질문으로 병렬 시뮬레이션을 실행합니다.")
+        comp_urls_new   = list(st.session_state["comp_urls"])
+        comp_brands_new = list(st.session_state["comp_brands"])
+        for ci in range(3):
+            cc1, cc2 = st.columns([3, 2])
+            with cc1:
+                comp_urls_new[ci] = st.text_input(
+                    f"경쟁사 {ci+1} URL", value=comp_urls_new[ci],
+                    placeholder="예) competitor.co.kr", key=f"comp_url_{ci}",
+                )
+            with cc2:
+                comp_brands_new[ci] = st.text_input(
+                    f"브랜드명", value=comp_brands_new[ci],
+                    placeholder="예) 경쟁사A", key=f"comp_brand_{ci}",
+                )
+        st.session_state["comp_urls"]   = comp_urls_new
+        st.session_state["comp_brands"] = comp_brands_new
+
+        q_count_now = st.session_state["q_count"]
+        qs_now      = [st.session_state["questions_list"][i]
+                       for i in range(q_count_now)
+                       if i < len(st.session_state["questions_list"])
+                       and st.session_state["questions_list"][i].strip()]
+
+        comp_btn = st.button("🆚 경쟁사 비교 실행", key="btn_comp_run", use_container_width=True)
+        if comp_btn:
+            valid_pairs = [(u.strip(), b.strip())
+                           for u, b in zip(comp_urls_new, comp_brands_new) if u.strip() and b.strip()]
+            if not valid_pairs:
+                st.warning("경쟁사 URL과 브랜드명을 최소 1개 입력하세요.")
+            elif not qs_now:
+                st.warning("비교에 사용할 질문을 먼저 입력하세요.")
+            elif not gpt_ok and not gemini_ok:
+                st.error("사이드바에서 API 키를 입력하세요.")
+            else:
+                with st.spinner("경쟁사 시뮬레이션 실행 중..."):
+                    _comp_res = run_competitor_comparison(
+                        client_gpt, client_gemini,
+                        [p[0] for p in valid_pairs],
+                        [p[1] for p in valid_pairs],
+                        qs_now, sim_count, gpt_model, tracker,
+                    )
+                    st.session_state["comp_results"] = _comp_res
+                    save_cache()
+                    st.session_state["cost_tracker"] = tracker
+
+        if st.session_state.get("comp_results"):
+            st.markdown("#### 경쟁사 비교 결과")
+            render_competitor_bar_chart(st.session_state["comp_results"], qs_now or ["Q1", "Q2", "Q3"])
+            # Summary table
+            _cr = st.session_state["comp_results"]
+            for brand, res_list in _cr.items():
+                if not res_list:
+                    continue
+                avgs = []
+                for r in res_list:
+                    v = (r.get("avg_rate") if isinstance(r, dict) else getattr(r, "avg_rate", None)) or 0
+                    avgs.append(v)
+                overall = sum(avgs) / len(avgs) if avgs else 0
+                st.markdown(f"""
+                <div style="display:flex;justify-content:space-between;align-items:center;
+                    padding:8px 14px;border-radius:8px;margin:4px 0;
+                    background:{_card};border:1px solid {_border};">
+                    <span style="font-weight:600;color:{_text};">{brand}</span>
+                    <span style="color:{_text_muted};font-size:.85rem;">전체 평균 인용율: <strong style="color:{_text};">{overall:.1f}%</strong></span>
+                </div>""", unsafe_allow_html=True)
+
+    # ── 기능 3: AI 질문 추천 ──────────────────────────────────────────────────
+    st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
+
+    rec_col1, rec_col2 = st.columns([3, 2])
+    with rec_col1:
+        if st.button("💡 AI 질문 추천 받기", key="btn_rec_qs", use_container_width=True):
+            if not gpt_ok and not gemini_ok:
+                st.warning("API 키를 먼저 입력하세요.")
+            else:
+                _u = url_input.strip() or ""
+                _b = brand_input.strip() or ""
+                with st.spinner("AI가 질문을 추천하는 중..."):
+                    rec_qs = recommend_questions(_u, _b, client_gpt, client_gemini, gpt_model)
+                st.session_state["recommended_qs"] = rec_qs
+                st.session_state["show_rec_qs"]    = True
+                st.rerun()
+
+    if st.session_state.get("show_rec_qs") and st.session_state.get("recommended_qs"):
+        with st.expander("💡 추천 질문 선택", expanded=True):
+            st.caption("체크한 질문이 아래 입력창에 추가됩니다.")
+            selected: list = []
+            for qi, rq in enumerate(st.session_state["recommended_qs"]):
+                if st.checkbox(rq, key=f"rec_q_chk_{qi}"):
+                    selected.append(rq)
+            if st.button("선택한 질문 적용", key="btn_apply_rec"):
+                current_count = st.session_state["q_count"]
+                current_list  = st.session_state["questions_list"]
+                for sq in selected:
+                    if current_count >= 5:
+                        break
+                    if len(current_list) <= current_count:
+                        current_list.append(sq)
+                    else:
+                        current_list[current_count] = sq
+                    current_count += 1
+                st.session_state["q_count"]        = min(5, current_count)
+                st.session_state["questions_list"] = current_list
+                st.session_state["show_rec_qs"]    = False
+                st.rerun()
+            if st.button("닫기", key="btn_close_rec"):
+                st.session_state["show_rec_qs"] = False
+                st.rerun()
+
+    # ── Question inputs ────────────────────────────────────────────────────────
     q_count = st.session_state["q_count"]
     st.markdown(f"""<div style="font-size:.82rem;font-weight:700;color:{_text};margin-bottom:10px;">
         🎯 분석할 질문 <span style="color:{_text_muted};font-size:.76rem;font-weight:400;margin-left:6px;">{q_count}/5개</span>
@@ -640,6 +1279,7 @@ with tab_main:
             st.session_state["questions_list"] = [""]
             st.rerun()
 
+    # ── Demo block ─────────────────────────────────────────────────────────────
     if st.session_state.get("run_demo"):
         st.session_state["run_demo"] = False
         demo_url = normalize_url(url_input.strip() if url_input.strip() else "naver.com")
@@ -661,6 +1301,7 @@ with tab_main:
         st.markdown("---")
         render_strategy(_DEMO_STRATEGY, demo_url)
 
+    # ── Main analysis run ──────────────────────────────────────────────────────
     elif run_btn:
         errors = []
         if not url_input.strip():   errors.append("사이트 URL")
@@ -705,9 +1346,7 @@ with tab_main:
             elapsed_sim = int(time.time() - t0)
             prog.progress(0.6)
 
-            # FIX: sim_results 에서 competitor_mentions 집계
             sim_mentions = _aggregate_sim_mentions(all_results)
-
             save_cache()
             st.session_state["cost_tracker"] = tracker
             stat.success(f"시뮬레이션 완료 ({elapsed_sim}초) | 추정비용 ~${tracker.summary()['estimated_usd']:.4f}")
@@ -723,9 +1362,76 @@ with tab_main:
                 f"'{brand_name}' AI 인용 점유율"
             )
 
-            prog.progress(0.7)
+            # ── 기능 7: 질문별 상세 + AI 응답 원문 ───────────────────────────
+            st.markdown("### 📋 질문별 상세 결과")
+            brand_variants = build_brand_variants(brand_name)
+            _sent_colors = {
+                "긍정": "#10B981", "부정": "#EF4444",
+                "중립": "#F59E0B", "미언급": "#888888",
+            }
+            for i, (q, r) in enumerate(zip(questions_input, all_results)):
+                _g = lambda k, rr=r: (rr.get(k) if isinstance(rr, dict) else getattr(rr, k, None))
+                avg       = _g("avg_rate") or 0
+                gpt_r     = _g("gpt_rate")
+                gem_r     = _g("gemini_rate")
+                gpt_hits  = _g("gpt_hits") or 0
+                gem_hits  = _g("gemini_hits") or 0
+                n_sim     = _g("n") or sim_count
+                badge_cls = "share-badge-high" if avg >= 30 else "share-badge-mid" if avg >= 10 else "share-badge-low"
 
+                with st.expander(f"Q{i+1}. {q[:55]} — 평균 {avg:.1f}%", expanded=(i == 0)):
+                    mc1, mc2, mc3, mc4 = st.columns(4)
+                    mc1.metric("GPT",     f"{gpt_r:.1f}%" if gpt_r is not None else "-")
+                    mc2.metric("Gemini",  f"{gem_r:.1f}%" if gem_r is not None else "-")
+                    mc3.metric("평균",    f"{avg:.1f}%")
+                    mc4.metric("GPT 히트", f"{gpt_hits}/{n_sim}회")
+                    st.markdown(f'<span class="{badge_cls}">점유율 {avg:.1f}%</span>',
+                                unsafe_allow_html=True)
+
+                    gpt_samples    = (_g("gpt_samples")    or []) if isinstance(r, dict) else (getattr(r, "gpt_samples",    []) or [])
+                    gemini_samples = (_g("gemini_samples") or []) if isinstance(r, dict) else (getattr(r, "gemini_samples", []) or [])
+
+                    if gpt_samples or gemini_samples:
+                        st.markdown(f"<div style='margin-top:10px;font-size:.82rem;font-weight:700;color:{_text};'>🤖 AI 응답 샘플</div>",
+                                    unsafe_allow_html=True)
+
+                    if gpt_samples:
+                        with st.expander(f"GPT 응답 샘플 ({len(gpt_samples)}개)", expanded=False):
+                            for j, sample in enumerate(gpt_samples[:3]):
+                                sent  = classify_sentiment(sample, brand_name)
+                                sc    = _sent_colors.get(sent, "#888")
+                                hi    = highlight_brand(str(sample)[:600], brand_variants)
+                                st.markdown(f"""
+                                <div style="background:{_card};border:1px solid {_border};border-radius:8px;
+                                    padding:10px 14px;margin:6px 0;">
+                                    <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+                                        <span style="font-size:.73rem;font-weight:700;color:{_text_muted};">GPT 응답 #{j+1}</span>
+                                        <span style="background:{sc};color:white;padding:1px 8px;border-radius:12px;
+                                            font-size:.7rem;font-weight:700;">{sent}</span>
+                                    </div>
+                                    <div style="font-size:.82rem;color:{_text};line-height:1.65;">{hi}</div>
+                                </div>""", unsafe_allow_html=True)
+
+                    if gemini_samples:
+                        with st.expander(f"Gemini 응답 샘플 ({len(gemini_samples)}개)", expanded=False):
+                            for j, sample in enumerate(gemini_samples[:3]):
+                                sent  = classify_sentiment(sample, brand_name)
+                                sc    = _sent_colors.get(sent, "#888")
+                                hi    = highlight_brand(str(sample)[:600], brand_variants)
+                                st.markdown(f"""
+                                <div style="background:{_card};border:1px solid {_border};border-radius:8px;
+                                    padding:10px 14px;margin:6px 0;">
+                                    <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+                                        <span style="font-size:.73rem;font-weight:700;color:{_text_muted};">Gemini 응답 #{j+1}</span>
+                                        <span style="background:{sc};color:white;padding:1px 8px;border-radius:12px;
+                                            font-size:.7rem;font-weight:700;">{sent}</span>
+                                    </div>
+                                    <div style="font-size:.82rem;color:{_text};line-height:1.65;">{hi}</div>
+                                </div>""", unsafe_allow_html=True)
+
+            prog.progress(0.7)
             stat.markdown("🧠 **전략 분석 생성 중...**")
+
             with CaptureError("strategy", log_level="warning") as s_ctx:
                 strategy = run_strategy_analysis(
                     client_gpt, client_gemini,
@@ -744,19 +1450,64 @@ with tab_main:
 
             if s_ctx.ok and strategy:
                 st.markdown("---")
-                # FIX: sim_mentions 전달 — competitors 빈 경우 fallback 표시
                 render_strategy(strategy, target_url, sim_mentions=sim_mentions)
                 stat.success("전략 분석 완료!")
             else:
-                # 전략 분석 실패해도 competitor_mentions 집계는 표시
                 if sim_mentions:
                     st.markdown("---")
                     render_strategy(
                         {"competitors": [], "diagnoses": [], "keywords": [], "geo_guides": []},
-                        target_url,
-                        sim_mentions=sim_mentions,
+                        target_url, sim_mentions=sim_mentions,
                     )
                 st.warning("전략 분석을 완료하지 못했습니다. API 키를 확인하세요.")
+                strategy = {}
+
+            # ── 기능 4: PDF 다운로드 ──────────────────────────────────────────
+            st.markdown("---")
+            if _REPORTLAB_OK:
+                pdf_bytes = generate_pdf(
+                    brand_name, target_url, questions_input,
+                    [r.to_dict() if hasattr(r, "to_dict") else r for r in all_results],
+                    strategy or {},
+                )
+                if pdf_bytes:
+                    ts_str = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+                    st.download_button(
+                        label="📄 PDF 리포트 다운로드",
+                        data=pdf_bytes,
+                        file_name=f"ai_citation_{brand_name}_{ts_str}.pdf",
+                        mime="application/pdf",
+                        key="btn_pdf_dl",
+                        use_container_width=False,
+                    )
+                else:
+                    st.caption("PDF 생성에 실패했습니다.")
+            else:
+                st.caption("PDF 기능을 사용하려면 `pip install reportlab` 을 실행하세요.")
+
+            # ── 기능 1: GSheets 자동 저장 ─────────────────────────────────────
+            _sa  = st.session_state.get("sa_json_str", "")
+            _shu = st.session_state.get("gsheets_url", "")
+            if _sa.strip() and _shu.strip() and _GSPREAD_OK:
+                _gc = _get_gsheets_client(_sa)
+                if _gc:
+                    ok = save_to_gsheets(
+                        _gc, _shu, brand_name, domain,
+                        questions_input,
+                        [r.to_dict() if hasattr(r, "to_dict") else r for r in all_results],
+                    )
+                    if ok:
+                        st.success("Google Sheets에 결과가 저장되었습니다.")
+                    else:
+                        st.warning("Google Sheets 저장 실패. JSON 키와 Sheet URL을 확인하세요.")
+
+            # Persist for GEO editor
+            st.session_state["last_all_results"]  = [r.to_dict() if hasattr(r, "to_dict") else r for r in all_results]
+            st.session_state["last_strategy"]     = strategy or {}
+            st.session_state["last_questions"]    = questions_input
+            st.session_state["last_url"]          = target_url
+            st.session_state["last_brand"]        = brand_name
+            st.session_state["last_sim_mentions"] = sim_mentions
 
             save_cache()
             st.session_state["cost_tracker"] = tracker
@@ -767,9 +1518,61 @@ with tab_main:
                 "brand":     brand_name,
                 "n_q":       len(questions_input),
                 "questions": questions_input,
-                "results":   [r.to_dict() if hasattr(r,"to_dict") else r for r in all_results],
+                "results":   [r.to_dict() if hasattr(r, "to_dict") else r for r in all_results],
             })
 
+    # ── 기능 1: GSheets 추이 차트 (persistent) ────────────────────────────────
+    _sa_p  = st.session_state.get("sa_json_str", "")
+    _shu_p = st.session_state.get("gsheets_url", "")
+    _lb_p  = st.session_state.get("last_brand", "")
+    if _sa_p.strip() and _shu_p.strip() and _lb_p and _GSPREAD_OK:
+        with st.expander("📈 인용율 추이 (Google Sheets)", expanded=False):
+            if st.button("추이 데이터 불러오기", key="btn_gs_load"):
+                _gc_p = _get_gsheets_client(_sa_p)
+                if _gc_p:
+                    _recs = load_from_gsheets(_gc_p, _shu_p)
+                    if _recs:
+                        render_gsheets_trend(_recs, _lb_p)
+                    else:
+                        st.caption("저장된 데이터가 없습니다.")
+                else:
+                    st.warning("GSheets 연결 실패. 서비스 계정 JSON을 확인하세요.")
+
+    # ── 기능 9: Content GEO 점수 편집기 (persistent) ──────────────────────────
+    _lb9 = st.session_state.get("last_brand", "")
+    with st.expander("✏️ 콘텐츠 GEO 점수 편집기", expanded=False):
+        st.caption("홈페이지 또는 랜딩 페이지 본문을 붙여넣으면 AI가 GEO 점수(0-100)를 분석합니다.")
+        geo_content = st.text_area(
+            "분석할 콘텐츠 붙여넣기",
+            height=180,
+            placeholder="홈페이지 소개 텍스트, 서비스 설명 등을 붙여넣으세요...",
+            key="geo_editor_input",
+        )
+        geo_brand_inp = st.text_input(
+            "브랜드명 (GEO 분석용)",
+            value=_lb9,
+            placeholder="예) 프로그레스미디어",
+            key="geo_brand_input",
+        )
+        if st.button("GEO 점수 분석", key="btn_geo_analyze", use_container_width=True):
+            if not geo_content.strip():
+                st.warning("분석할 콘텐츠를 입력하세요.")
+            elif not gpt_ok and not gemini_ok:
+                st.error("사이드바에서 API 키를 입력하세요.")
+            else:
+                with st.spinner("GEO 점수 분석 중..."):
+                    geo_res = run_geo_editor_analysis(
+                        geo_content, geo_brand_inp or _lb9 or "브랜드",
+                        client_gpt, client_gemini, gpt_model,
+                    )
+                    st.session_state["geo_editor_result"] = geo_res
+
+        if st.session_state.get("geo_editor_result"):
+            st.markdown("#### GEO 점수 결과")
+            render_geo_radar(st.session_state["geo_editor_result"])
+
+
+# ── Tab: 히스토리 ──────────────────────────────────────────────────────────────
 
 with tab_hist:
     history = st.session_state.get("history", [])
@@ -807,6 +1610,6 @@ with tab_hist:
 
 st.markdown(f"""
 <div class="app-footer">
-    AI Citation Analyzer v3.1 &nbsp;|&nbsp;
+    AI Citation Analyzer v4.0 &nbsp;|&nbsp;
     <span style="color:{_text_muted};">Powered by GPT &amp; Gemini</span>
 </div>""", unsafe_allow_html=True)
