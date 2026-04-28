@@ -1,13 +1,10 @@
 """
-비즈니스 분석 오케스트레이터 v3.0
+biz_analysis.py — 비즈니스 분석 오케스트레이터 v3.1
 
-수정 사항 (버그픽스):
-1. run_strategy_analysis 시그니처 — app.py 호출 방식과 일치하도록 파라미터 추가
-   (biz_info, competitors, sim_results, questions 모두 수용)
-2. run_strategy_analysis futures TimeoutError 방어 처리
-3. _parse_questions bold(**) 제거 regex 수정
-4. _competitors() JSON 파싱 실패 시 에러 로그 추가
-5. cache.get() 반환값 단일값으로 통일 (언팩킹 제거)
+수정 사항:
+- run_strategy_analysis → strategy_analyzer.run_strategy_analysis 에 위임
+  (strategy_analyzer.py 가 site_content 크롤 + 경쟁사 맥락 기반 블루오션 키워드 생성)
+- 기타 analyze_business, generate_target_questions 등 기존 로직 유지
 """
 
 from __future__ import annotations
@@ -56,17 +53,14 @@ def analyze_business(
 
     stem = domain.split(".")[0]
 
-    # Step 1: 크롤링
     crawl_result = crawl(url, use_cache=use_cache)
 
-    # Step 2: 텍스트 정제
     clean_text = extract_business_text(crawl_result.body_text)
     logger.info(
         f"extract_business_text: {len(crawl_result.body_text)} "
         f"→ {len(clean_text)} chars (tier={crawl_result.tier_used})"
     )
 
-    # Step 3: 검색 보완
     search_ctx = ""
     with CaptureError("biz_search", log_level="info"):
         search_ctx = crawl_search(f"{stem} 서비스 업종 소개", use_cache=use_cache)
@@ -75,7 +69,6 @@ def analyze_business(
                 f"{stem} company overview service", use_cache=use_cache
             )
 
-    # Step 4: 업종 분류 위임
     return classify_industry(
         client_gpt=client_gpt,
         client_gemini=client_gemini,
@@ -124,7 +117,6 @@ def generate_target_questions(
     biz_info: Optional[BusinessInfo] = None,
     use_cache: bool = True,
 ) -> list[str]:
-    """비즈니스 정보 기반 고품질 타겟 질문 5개 생성."""
     try:
         p      = urlparse(url if url.startswith("http") else "https://" + url)
         domain = p.netloc.replace("www.", "")
@@ -145,7 +137,6 @@ def generate_target_questions(
         "questions", _QUESTION_VERSION, url, biz_info.industry, engine, model_gpt
     )
 
-    # BUG FIX: cache.get() 단일값 반환
     if use_cache:
         cached = cache.get(cache_key)
         if cached:
@@ -213,7 +204,6 @@ def _parse_questions(raw: str) -> list[str]:
         clean = re.sub(r'^\d+[.)]\s*', '', ln)
         clean = re.sub(r'^[-•*]\s*', '', clean)
         clean = re.sub(r'^\[.*?\]\s*', '', clean)
-        # BUG FIX: **bold** 제거 — raw string에서 \* 는 리터럴 * 이므로 정상 동작하도록 수정
         clean = re.sub(r'^\*\*.*?\*\*\s*', '', clean).strip()
         if len(clean) > 10:
             if not clean.endswith("?"):
@@ -242,32 +232,17 @@ def _fallback_questions(biz: BusinessInfo) -> list[str]:
 
 
 # ─────────────────────────────────────────────
-# 전략 분석
-# BUG FIX: app.py 호출 시그니처와 일치하도록 파라미터 재정의
-# app.py에서 호출:
-#   run_strategy_analysis(
-#       client_gpt, client_gemini,
-#       biz_info=biz_info,
-#       competitors=competitors,
-#       sim_results=all_results,
-#       questions=questions,
-#       tracker=tracker,
-#   )
+# 전략 분석 — strategy_analyzer 에 위임
 # ─────────────────────────────────────────────
-
-_STRATEGY_VERSION = "v4"
-
 
 def run_strategy_analysis(
     client_gpt,
     client_gemini,
-    # 새 시그니처 (app.py 호출 방식)
     biz_info:    Optional[BusinessInfo] = None,
     competitors: list = None,
     sim_results: list = None,
     questions:   list = None,
     tracker=None,
-    # 기존 레거시 파라미터 (하위 호환)
     question:    str = "",
     target_url:  str = "",
     model_gpt:   str = "gpt-4o-mini",
@@ -275,206 +250,23 @@ def run_strategy_analysis(
     use_cache:   bool = True,
 ) -> dict:
     """
-    전략 분석.
-    app.py의 새 호출 방식(biz_info/competitors/sim_results/questions 키워드)과
-    레거시 호출 방식(question/target_url 위치 인수) 모두 지원.
+    전략 분석 진입점.
+    실제 로직은 strategy_analyzer.run_strategy_analysis 에 위임.
+    strategy_analyzer 는 site_content 크롤 + sim_results competitor_mentions 기반
+    블루오션 키워드 발굴까지 수행.
     """
-    competitors  = competitors  or []
-    sim_results  = sim_results  or []
-    questions    = questions    or []
-
-    # target_url / domain 결정
-    _url = target_url or (biz_info.brand_name if biz_info else "")
-    try:
-        p      = urlparse(_url if _url.startswith("http") else "https://" + _url)
-        domain = p.netloc.replace("www.", "") or _url
-    except Exception:
-        domain = _url
-
-    # 대표 질문 결정 (단수 question 우선, 없으면 questions[0])
-    rep_question = question or (questions[0] if questions else "AI 인용 점유율 분석")
-
-    cache     = get_cache()
-    cache_key = cache.make_key(
-        "strategy", _STRATEGY_VERSION,
-        domain, rep_question[:50], market_scope, model_gpt,
+    from core.strategy_analyzer import run_strategy_analysis as _run
+    return _run(
+        client_gpt=client_gpt,
+        client_gemini=client_gemini,
+        biz_info=biz_info,
+        competitors=competitors,
+        sim_results=sim_results,
+        questions=questions,
+        tracker=tracker,
+        question=question,
+        target_url=target_url,
+        model_gpt=model_gpt,
+        market_scope=market_scope,
+        use_cache=use_cache,
     )
-
-    # BUG FIX: cache.get() 단일값
-    if use_cache:
-        cached = cache.get(cache_key)
-        if cached:
-            logger.info(f"Cache HIT: strategy({rep_question[:30]}...)")
-            return cached
-
-    biz = biz_info or BusinessInfo(
-        brand_name=domain, industry="서비스", industry_category="기타",
-        core_product="서비스", target_audience="고객",
-    )
-
-    scope_inst = (
-        "반드시 대한민국에서 서비스하는 국내 기업만 포함하세요."
-        if "국내" in market_scope
-        else "국내외 글로벌 기업을 모두 포함하세요."
-    )
-
-    _system = (
-        "당신은 디지털 마케팅 전략 컨설턴트입니다. "
-        "모든 답변은 완성된 문장으로, 중간에 끊기지 않게 서술하세요."
-    )
-
-    # 시뮬레이션 결과 요약 (전략 프롬프트에 컨텍스트 제공)
-    sim_ctx = ""
-    if sim_results and questions:
-        lines = []
-        for q, r in zip(questions[:3], sim_results[:3]):
-            avg = getattr(r, "avg_rate", None) or (r.get("avg_rate") if isinstance(r, dict) else None)
-            if avg is not None:
-                lines.append(f"- Q: {q[:40]} → 평균 점유율 {avg:.1f}%")
-        if lines:
-            sim_ctx = "\n[시뮬레이션 결과 요약]\n" + "\n".join(lines)
-
-    # ── 병렬 4개 작업 ──
-
-    def _competitors_fn() -> list:
-        # 이미 competitors가 있으면 재사용, 없으면 AI 생성
-        if competitors:
-            return competitors[:10]
-
-        prompt = f"""질문: "{rep_question}"
-
-이 질문에 답변할 때 AI가 자주 인용할 상위 10개 브랜드를 인용 가능성 순으로 나열하세요.
-- 분석 대상: {biz.brand_name} (업종: {biz.industry})
-- {scope_inst}
-- {domain}도 적절한 순위에 포함
-- 반드시 실제 존재하는 브랜드와 도메인만 사용
-
-JSON 배열만 출력 (다른 텍스트 없이):
-[{{"rank":1,"domain":"실제도메인.com","brand_name":"실제브랜드명","reason":"이유 20자 이내","position":"업계1위|신흥강자|틈새전문 중 택1"}}]"""
-
-        raw = ""
-        with CaptureError("strategy_comp", log_level="warning"):
-            raw = (
-                call_gpt(client_gpt, prompt, system=_system, max_tokens=1200,
-                         model=model_gpt, temperature=0.3)
-                if client_gpt else
-                call_gemini(client_gemini, prompt, max_tokens=1200, temperature=0.3)
-            )
-
-        # BUG FIX: 파싱 실패 시 에러 로그 추가
-        parsed_comps = []
-        with CaptureError("strategy_comp_parse", log_level="warning") as ctx:
-            m = re.search(r'\[.*\]', raw, re.DOTALL)
-            if m:
-                parsed = json.loads(m.group())
-                parsed_comps = [
-                    c for c in parsed
-                    if c.get("domain") and
-                    not re.match(
-                        r'^(c\d+|competitor\d*|example|test|dummy)\.',
-                        str(c.get("domain", ""))
-                    )
-                ]
-        if not ctx.ok:
-            logger.warning(f"strategy_comp_parse 실패: raw={raw[:200]}")
-        return parsed_comps
-
-    def _diagnosis() -> list[str]:
-        prompt = (
-            f'{domain} ({biz.brand_name}, {biz.industry})이 "{rep_question}"에서 '
-            f'AI 인용 점유율이 낮은 원인 3가지.\n'
-            f'{sim_ctx}\n'
-            f'경쟁사 대비 구체적 문제점. 각 항목 50자 이내. 반드시 한국어로. 번호 없이 한 줄씩:'
-        )
-        with CaptureError("strategy_diag", log_level="warning"):
-            r = (
-                call_gpt(client_gpt, prompt, system=_system, max_tokens=600,
-                         model=model_gpt, temperature=0.4)
-                if client_gpt else
-                call_gemini(client_gemini, prompt, max_tokens=600, temperature=0.4)
-            )
-        items = [d.strip().lstrip("•-*") for d in r.split("\n") if d.strip()][:3]
-        return items or ["데이터 부족으로 분석 불가"]
-
-    def _keywords() -> list[str]:
-        prompt = (
-            f'{biz.industry} 분야에서 AI 인용 확률 높은 블루오션 키워드 5개를 한국어로 추천해주세요.\n'
-            f'조건: 경쟁이 적고 전문성 높은 틈새 키워드. {scope_inst}\n'
-            f'반드시 한국어 키워드만. 영어 금지. 키워드만 한 줄에 하나씩 출력:'
-        )
-        with CaptureError("strategy_kw", log_level="warning"):
-            r = (
-                call_gemini(client_gemini, prompt, max_tokens=600, temperature=0.7)
-                if client_gemini else
-                call_gpt(client_gpt, prompt, system=_system, max_tokens=600,
-                         model=model_gpt, temperature=0.7)
-            )
-        items = [
-            k.strip().lstrip("•-*1234567890. ")
-            for k in r.split("\n")
-            if k.strip() and len(k.strip()) > 2
-        ][:5]
-        return items or ["분석 중 오류"]
-
-    def _geo() -> list[str]:
-        prompt = (
-            f'{domain} ({biz.brand_name})이 "{rep_question}"에서 AI에 더 잘 인용되도록 '
-            f'홈페이지 개선 방안 3가지.\n'
-            f'구체적 문구 수정 또는 구조 변경 제안 포함. 각 항목 2줄 이내. 번호 포함:'
-        )
-        with CaptureError("strategy_geo", log_level="warning"):
-            r = (
-                call_gpt(client_gpt, prompt, system=_system, max_tokens=1000,
-                         model=model_gpt, temperature=0.5)
-                if client_gpt else
-                call_gemini(client_gemini, prompt, max_tokens=1000, temperature=0.5)
-            )
-        items = [g.strip() for g in re.split(r'\n(?=\d+\.)', r) if g.strip()][:3]
-        return items or ["분석 중 오류"]
-
-    # BUG FIX: TimeoutError 방어 처리
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
-        f_comp = ex.submit(_competitors_fn)
-        f_diag = ex.submit(_diagnosis)
-        f_kw   = ex.submit(_keywords)
-        f_geo  = ex.submit(_geo)
-
-        def _safe_result(future, default, label: str):
-            try:
-                return future.result(timeout=60) or default
-            except concurrent.futures.TimeoutError:
-                logger.warning(f"strategy timeout: {label}")
-                return default
-            except Exception as e:
-                logger.warning(f"strategy error [{label}]: {e}")
-                return default
-
-        comp_result = _safe_result(f_comp, [],                    "competitors")
-        diagnoses   = _safe_result(f_diag, ["데이터 부족으로 분석 불가"], "diagnosis")
-        keywords    = _safe_result(f_kw,   ["분석 중 오류"],           "keywords")
-        geo_guides  = _safe_result(f_geo,  ["분석 중 오류"],           "geo")
-
-    # Competitor 객체 → dict 변환 (render_strategy는 dict 기대)
-    comp_dicts = []
-    for c in comp_result:
-        if isinstance(c, dict):
-            comp_dicts.append(c)
-        elif hasattr(c, "__dict__"):
-            comp_dicts.append(vars(c))
-        else:
-            try:
-                comp_dicts.append(c.to_dict())
-            except Exception:
-                pass
-
-    result = {
-        "competitors": comp_dicts,
-        "diagnoses":   diagnoses,
-        "keywords":    keywords,
-        "geo_guides":  geo_guides,
-    }
-
-    if use_cache:
-        cache.set(cache_key, result, namespace="strategy")
-
-    return result

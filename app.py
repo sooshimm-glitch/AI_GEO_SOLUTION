@@ -1,5 +1,12 @@
 """
-AI Citation Analyzer v3.0 — 통합형
+AI Citation Analyzer v3.1 — 통합형
+
+수정 사항:
+1. render_strategy — 블루오션 키워드 섹션 추가 (기존에 keywords 필드는 있었으나 표시 누락)
+2. render_strategy — competitor_mentions 집계 데이터를 fallback으로 활용
+   (strategy 분석에서 competitors 빈 경우 시뮬레이션 집계 결과 표시)
+3. run_btn 블록 — sim_results 에서 competitor_mentions 집계 후 render_strategy 에 전달
+4. render_strategy 시그니처: sim_mentions 파라미터 추가
 """
 
 import streamlit as st
@@ -193,6 +200,24 @@ def save_cache():
     with CaptureError("save_cache", log_level="debug"):
         st.session_state["cache_data"] = _cache.to_serializable()
 
+def _aggregate_sim_mentions(all_results: list) -> dict:
+    """sim_results 의 competitor_mentions 를 브랜드별로 집계."""
+    merged: dict = {}
+    for r in all_results:
+        comp_m = (
+            r.competitor_mentions if hasattr(r, "competitor_mentions")
+            else r.get("competitor_mentions", {}) if isinstance(r, dict) else {}
+        )
+        for brand, data in comp_m.items():
+            if brand not in merged:
+                merged[brand] = {"mentions": 0, "urls": []}
+            cnt = data.get("mentions", 0) if isinstance(data, dict) else 1
+            merged[brand]["mentions"] += cnt
+            if isinstance(data, dict):
+                merged[brand]["urls"] = list(set(merged[brand]["urls"] + data.get("urls", [])))
+    return merged
+
+
 _DEMO_SCENARIOS = {
     "naver.com": {
         "brand": "네이버", "industry": "포털/검색 서비스",
@@ -302,29 +327,72 @@ def render_bar_chart(results: list, questions: list, title: str = "AI 엔진별 
     st.plotly_chart(fig, use_container_width=True, key=f'chart_{_chart_counter["n"]}')
 
 
-def render_strategy(strategy: dict, target_url: str):
+def render_strategy(strategy: dict, target_url: str, sim_mentions: dict = None):
+    """
+    전략 분석 결과 렌더링.
+
+    sim_mentions: run_all_simulations 의 competitor_mentions 집계 결과.
+                  strategy.competitors 가 비어있을 때 fallback 으로 사용.
+    """
     domain = extract_domain(target_url)
-    st.markdown("### 🏆 AI 인용 경쟁 현황 (TOP 5)")
+    sim_mentions = sim_mentions or {}
+
     pos_colors = {
         "업계1위":"#10B981","업계 1위":"#10B981",
         "신흥강자":"#F59E0B","신흥 강자":"#F59E0B",
         "틈새전문":"#6366F1","틈새 전문":"#6366F1",
     }
+
+    # ── AI 인용 경쟁 현황 (TOP 5) ──
+    st.markdown("### 🏆 AI 인용 경쟁 현황 (TOP 5)")
+
     competitors = strategy.get("competitors", [])[:5]
+
+    # FIX: competitors 빈 경우 sim_mentions 집계 결과로 fallback
+    if not competitors and sim_mentions:
+        sorted_m = sorted(
+            sim_mentions.items(),
+            key=lambda x: x[1].get("mentions", 0),
+            reverse=True
+        )[:5]
+        competitors = [
+            {
+                "rank": i + 1,
+                "brand_name": brand,
+                "domain": next(
+                    (u.split("/")[2] for u in data.get("urls", []) if u.startswith("http")),
+                    ""
+                ),
+                "reason": f"AI 응답 {data.get('mentions', 0)}회 언급",
+                "position": ["업계1위", "신흥강자", "신흥강자", "틈새전문", "틈새전문"][i],
+            }
+            for i, (brand, data) in enumerate(sorted_m)
+            if brand
+        ]
+        if competitors:
+            st.caption("시뮬레이션 AI 응답에서 집계된 언급 기준 (전략 분석 보완)")
+
     if competitors:
         for comp in competitors:
-            r=comp.get("rank","?"); d=comp.get("domain",""); b=comp.get("brand_name",d)
-            reason=comp.get("reason",""); pos=comp.get("position",comp.get("market_position",""))
-            is_t=domain.lower() in d.lower()
+            r   = comp.get("rank", "?")
+            d   = comp.get("domain", "")
+            b   = comp.get("brand_name", d)
+            reason = comp.get("reason", "")
+            pos    = comp.get("position", comp.get("market_position", ""))
+            is_t   = domain.lower() in d.lower() if d else False
             if _dark:
-                bg="linear-gradient(135deg,#2A2A2A,#333)" if is_t else "#1E1E1E"
-                bd="#888" if is_t else "#333"
+                bg = "linear-gradient(135deg,#2A2A2A,#333)" if is_t else "#1E1E1E"
+                bd = "#888" if is_t else "#333"
             else:
-                bg="linear-gradient(135deg,#EEE,#E0E0E0)" if is_t else "#F8F8F8"
-                bd="#111" if is_t else "#DDD"
-            lbl=" <- 내 사이트" if is_t else ""
-            pc=pos_colors.get(pos,"#888")
-            pb=(f'<span style="background:{pc};color:white;padding:2px 8px;border-radius:20px;font-size:.72rem;font-weight:700;margin-left:8px;">{pos}</span>' if pos else "")
+                bg = "linear-gradient(135deg,#EEE,#E0E0E0)" if is_t else "#F8F8F8"
+                bd = "#111" if is_t else "#DDD"
+            lbl = " ← 내 사이트" if is_t else ""
+            pc  = pos_colors.get(pos, "#888")
+            pb  = (
+                f'<span style="background:{pc};color:white;padding:2px 8px;border-radius:20px;'
+                f'font-size:.72rem;font-weight:700;margin-left:8px;">{pos}</span>'
+                if pos else ""
+            )
             st.markdown(f"""
             <div style="display:flex;align-items:center;justify-content:space-between;
                 padding:11px 16px;border-radius:10px;margin:5px 0;
@@ -335,16 +403,20 @@ def render_strategy(strategy: dict, target_url: str):
                         color:white;font-weight:700;font-size:.8rem;
                         display:flex;align-items:center;justify-content:center;">{r}</div>
                     <span style="font-weight:{'700' if is_t else '500'};color:{_text};font-size:.9rem;">
-                        {b} <span style="color:{_text_muted};font-size:.78rem;">({d})</span>{lbl}{pb}
+                        {b}{(' <span style="color:'+_text_muted+';font-size:.78rem;">('+d+')</span>') if d else ""}{lbl}{pb}
                     </span>
                 </div>
                 <span style="color:{_text_muted};font-size:.8rem;">{reason}</span>
             </div>""", unsafe_allow_html=True)
     else:
-        st.caption("경쟁사 정보를 가져오지 못했습니다.")
+        st.info("시뮬레이션을 실행하면 AI 응답에서 경쟁사 데이터가 집계됩니다.")
 
-    st.markdown(f"<hr style='border:none;height:1px;background:linear-gradient(90deg,transparent,{_border},transparent);margin:20px 0;'>", unsafe_allow_html=True)
+    st.markdown(
+        f"<hr style='border:none;height:1px;background:linear-gradient(90deg,transparent,{_border},transparent);margin:20px 0;'>",
+        unsafe_allow_html=True,
+    )
 
+    # ── 인용 실패 원인 진단 ──
     st.markdown("### 🔬 인용 실패 원인 진단")
     _icons = ["❌", "⚡", "🔧"]
     for i, d in enumerate(strategy.get("diagnoses", [])):
@@ -354,6 +426,34 @@ def render_strategy(strategy: dict, target_url: str):
             <span>{_icons[i % len(_icons)]} {d}</span>
         </div>""", unsafe_allow_html=True)
 
+    st.markdown(
+        f"<hr style='border:none;height:1px;background:linear-gradient(90deg,transparent,{_border},transparent);margin:20px 0;'>",
+        unsafe_allow_html=True,
+    )
+
+    # ── 블루오션 키워드 (신규 섹션) ──
+    st.markdown("### 🌊 블루오션 키워드")
+    keywords = strategy.get("keywords", [])
+    if keywords:
+        st.caption("경쟁사 대비 AI 인용 가능성이 높은 틈새 키워드입니다. 콘텐츠 및 메타 태그에 활용하세요.")
+        for kw in keywords:
+            kw_text = kw.get("keyword", str(kw)) if isinstance(kw, dict) else str(kw)
+            if not kw_text or kw_text in ("분석 중 오류",):
+                continue
+            st.markdown(f"""
+            <div class="blue-ocean-item">
+                <span class="label">🎯 추천</span>
+                <span class="kw">{kw_text}</span>
+            </div>""", unsafe_allow_html=True)
+    else:
+        st.caption("키워드 분석을 완료하지 못했습니다. API 키를 확인하세요.")
+
+    st.markdown(
+        f"<hr style='border:none;height:1px;background:linear-gradient(90deg,transparent,{_border},transparent);margin:20px 0;'>",
+        unsafe_allow_html=True,
+    )
+
+    # ── GEO 최적화 가이드 ──
     st.markdown("### 📋 GEO 최적화 가이드")
     geo_guides = strategy.get("geo_guides", [])
     if geo_guides:
@@ -380,7 +480,7 @@ with st.sidebar:
     <div class="sidebar-logo">
         <span class="logo-icon">🔍</span>
         <h2>AI Citation Analyzer</h2>
-        <p>v3.0 - 통합 분석</p>
+        <p>v3.1 - 통합 분석</p>
     </div>""", unsafe_allow_html=True)
 
     if st.button("🌙 다크 모드" if not _dark else "☀️ 라이트 모드", key="btn_dark", use_container_width=True):
@@ -590,7 +690,7 @@ with tab_main:
             prog = st.progress(0)
             stat = st.empty()
 
-            stat.markdown(f"⚡ **{len(questions_input)}개 질문 x {sim_count}회 시뮬레이션 중...**")
+            stat.markdown(f"⚡ **{len(questions_input)}개 질문 × {sim_count}회 시뮬레이션 중...**")
             prog.progress(0.1)
 
             t0 = time.time()
@@ -604,6 +704,9 @@ with tab_main:
             )
             elapsed_sim = int(time.time() - t0)
             prog.progress(0.6)
+
+            # FIX: sim_results 에서 competitor_mentions 집계
+            sim_mentions = _aggregate_sim_mentions(all_results)
 
             save_cache()
             st.session_state["cost_tracker"] = tracker
@@ -619,9 +722,6 @@ with tab_main:
                 questions_input,
                 f"'{brand_name}' AI 인용 점유율"
             )
-
-
-
 
             prog.progress(0.7)
 
@@ -644,9 +744,18 @@ with tab_main:
 
             if s_ctx.ok and strategy:
                 st.markdown("---")
-                render_strategy(strategy, target_url)
+                # FIX: sim_mentions 전달 — competitors 빈 경우 fallback 표시
+                render_strategy(strategy, target_url, sim_mentions=sim_mentions)
                 stat.success("전략 분석 완료!")
             else:
+                # 전략 분석 실패해도 competitor_mentions 집계는 표시
+                if sim_mentions:
+                    st.markdown("---")
+                    render_strategy(
+                        {"competitors": [], "diagnoses": [], "keywords": [], "geo_guides": []},
+                        target_url,
+                        sim_mentions=sim_mentions,
+                    )
                 st.warning("전략 분석을 완료하지 못했습니다. API 키를 확인하세요.")
 
             save_cache()
@@ -698,6 +807,6 @@ with tab_hist:
 
 st.markdown(f"""
 <div class="app-footer">
-    AI Citation Analyzer v3.0 &nbsp;|&nbsp;
+    AI Citation Analyzer v3.1 &nbsp;|&nbsp;
     <span style="color:{_text_muted};">Powered by GPT &amp; Gemini</span>
 </div>""", unsafe_allow_html=True)

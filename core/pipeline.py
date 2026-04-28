@@ -3,11 +3,13 @@ pipeline.py — Crawler → Biz → Question 통합 오케스트레이터
 
 수정 사항 (버그픽스):
 1. ThreadPoolExecutor 누수 — try/finally로 항상 shutdown 보장
-2. comp_future None 체크 추가
-3. 캐시 히트 시 _do_competitors()가 biz_info 없이 실행되는 버그 수정
-4. CrawlResult 역직렬화 누락 필드 방어 처리 (get + 기본값)
-5. render_debug_panel 마크다운 이스케이프 수정
-6. question 캐시 히트 후 재진입 방어
+2. 크롤 타임아웃 시 shutdown(wait=False) — block 없이 즉시 반환
+3. 크롤 실패 시 1회 재시도 로직 추가
+4. comp_future None 체크 추가
+5. 캐시 히트 시 _do_competitors()가 biz_info 없이 실행되는 버그 수정
+6. CrawlResult 역직렬화 누락 필드 방어 처리 (get + 기본값)
+7. render_debug_panel 마크다운 이스케이프 수정
+8. question 캐시 히트 후 재진입 방어
 """
 
 from __future__ import annotations
@@ -35,7 +37,6 @@ from core.biz_analysis import (
 from core.industry_classifier import _BIZ_SYSTEM, _build_classify_prompt
 from core.schemas import _BAD_INDUSTRIES
 
-# 호환성 래퍼
 def _build_biz_prompt(domain: str, crawl_result, search_ctx: str) -> str:
     clean_text = (crawl_result.body_text if crawl_result and crawl_result.body_text else "")
     return _build_classify_prompt(domain, clean_text, search_ctx, "")
@@ -109,11 +110,9 @@ def content_filter(question: str, brand_name: str) -> dict:
             flags.append(f"strong_pattern: {pat}")
 
     if brand_name and brand_name.lower() in question.lower():
-        # 브랜드명 직접 포함 시 감점 — 실제 사용자는 브랜드 모르고 검색
         score -= 15
         flags.append("brand_direct_included")
     else:
-        # 브랜드명 없는 게 올바른 방향 — 업종/서비스 기반 질문
         score += 10
         flags.append("brand_not_included_good")
 
@@ -248,7 +247,6 @@ def analyze_business_from_crawl(
         if m:
             biz_dict = json.loads(m.group())
 
-    # 업종 모호 → retry
     if biz_dict:
         industry = biz_dict.get("industry", "")
         is_vague = any(bad in industry.lower() for bad in _BAD_INDUSTRIES)
@@ -327,7 +325,6 @@ def generate_questions_from_state(
 
     t0 = time.time()
 
-    # 핵심 키워드 추출
     site_keywords = ""
     if crawl_res and crawl_res.body_text:
         body    = crawl_res.body_text[:2000]
@@ -396,26 +393,24 @@ def generate_questions_from_state(
     if not ctx.ok:
         state.errors.append(f"question_gen: {ctx.error}")
 
-    # 파싱 — Gemini 마크다운 아이콘 완전 제거
     lines = [ln.strip() for ln in result_str.split("\n") if ln.strip()]
     raw_questions = []
     for ln in lines:
         clean = ln
-        clean = re.sub(r'_[a-zA-Z]+_', '', clean)             # _arrowRight_, _bold_ 등
-        clean = re.sub(r':[a-z_]+:', '', clean)                # :emoji_name: 형식
-        clean = re.sub(r'\*{1,3}(.*?)\*{1,3}', r'\1', clean) # *bold*, **bold**, ***bold***
-        clean = re.sub(r'^[\d]+[.)]\s*', '', clean)          # 앞머리 번호
-        clean = re.sub(r'^[-•*→▶►•◦‣⁃]\s*', '', clean)       # 앞머리 bullet/화살표 전체
-        clean = re.sub(r'^\[.*?\]\s*', '', clean)           # 앞머리 [태그]
-        clean = re.sub(r'[\u2600-\u27BF]', '', clean)        # 유니코드 특수기호
-        clean = re.sub(r'[\U0001F300-\U0001F9FF]', '', clean) # 이모지
-        clean = re.sub(r'\s{2,}', ' ', clean).strip()         # 연속 공백 정리
+        clean = re.sub(r'_[a-zA-Z]+_', '', clean)
+        clean = re.sub(r':[a-z_]+:', '', clean)
+        clean = re.sub(r'\*{1,3}(.*?)\*{1,3}', r'\1', clean)
+        clean = re.sub(r'^[\d]+[.)]\s*', '', clean)
+        clean = re.sub(r'^[-•*→▶►•◦‣⁃]\s*', '', clean)
+        clean = re.sub(r'^\[.*?\]\s*', '', clean)
+        clean = re.sub(r'[☀-➿]', '', clean)
+        clean = re.sub(r'[\U0001F300-\U0001F9FF]', '', clean)
+        clean = re.sub(r'\s{2,}', ' ', clean).strip()
         if len(clean) > 10 and not clean.startswith("참고") and not clean.startswith("주의"):
             if not clean.endswith("?"):
                 clean += "?"
             raw_questions.append(clean)
 
-    # Content Filter
     filtered       = []
     filter_results = []
     for q in raw_questions:
@@ -435,7 +430,6 @@ def generate_questions_from_state(
 
     questions = filtered[:5]
 
-    # 최소 3개 보장
     if len(questions) < 3:
         for q in raw_questions:
             if q not in questions:
@@ -443,7 +437,6 @@ def generate_questions_from_state(
             if len(questions) >= 5:
                 break
 
-    # 폴백
     if len(questions) < 3:
         is_ad = "광고" in biz.industry or "마케팅" in biz.industry
         state.errors.append("question_gen: 폴백 질문 사용")
@@ -479,7 +472,7 @@ def run_pipeline(
     confirmed_brand: str = "",
     q_engine: str = "GPT",
     market_scope: str = "국내 (대한민국)",
-    n_competitors: int = 3,  # 고정값 — 항상 3개만 도출
+    n_competitors: int = 3,
     tracker: Optional[CostTracker] = None,
     use_cache: bool = True,
     debug: bool = False,
@@ -518,7 +511,7 @@ def run_pipeline(
                 title        = cr_data.get("title", ""),
                 description  = cr_data.get("description", ""),
                 body_text    = cr_data.get("body_text", ""),
-                html_snippet = cr_data.get("html_snippet", ""),  # BUG FIX: 누락 필드 기본값
+                html_snippet = cr_data.get("html_snippet", ""),
                 tier_used    = cr_data.get("tier_used", 0),
                 ok           = cr_data.get("ok", False),
                 error        = cr_data.get("error", ""),
@@ -539,20 +532,28 @@ def run_pipeline(
                 ctx = crawl_search(f"{stem} company overview")
             return ctx or ""
 
-        with cf.ThreadPoolExecutor(max_workers=2) as ex:
-            f_crawl  = ex.submit(_do_crawl)
-            f_search = ex.submit(_do_search)
+        # FIX: try/finally + shutdown(wait=False) — timeout 후 block 없이 반환
+        _crawl_ex = cf.ThreadPoolExecutor(max_workers=2)
+        try:
+            f_crawl  = _crawl_ex.submit(_do_crawl)
+            f_search = _crawl_ex.submit(_do_search)
 
             with CaptureError("crawl_future", log_level="warning") as ctx:
                 state.crawl_result = f_crawl.result(timeout=25)
             if not ctx.ok:
                 state.errors.append(f"crawl: {ctx.error}")
                 state.crawl_result = CrawlResult(url=url, ok=False, tier_used=0)
+                # FIX: 크롤 실패 시 1회 재시도 (검색 보완 먼저 수집)
+                _cb("crawl", "크롤 실패, 재시도 중...")
+                with CaptureError("crawl_retry", log_level="warning"):
+                    state.crawl_result = crawl(url, use_cache=False)
 
             with CaptureError("search_future", log_level="warning"):
                 state.search_ctx = f_search.result(timeout=20)
+        finally:
+            _crawl_ex.shutdown(wait=False)
 
-        if use_cache and state.crawl_result.ok:
+        if use_cache and state.crawl_result and state.crawl_result.ok:
             cache.set(cache.make_key("pipeline_crawl", url), {
                 "crawl": {
                     "url":          state.crawl_result.url,
@@ -566,6 +567,9 @@ def run_pipeline(
                 },
                 "search_ctx": state.search_ctx,
             }, namespace="crawl")
+
+    if state.crawl_result is None:
+        state.crawl_result = CrawlResult(url=url, ok=False, tier_used=0)
 
     state.record_time("crawl", time.time() - t0)
     state.log("crawl", {
@@ -599,7 +603,6 @@ def run_pipeline(
 
     state.record_time("biz_analysis", time.time() - t0)
 
-    # 브랜드명 사용자 오버라이드
     if confirmed_brand.strip() and state.biz_info:
         state.biz_info.brand_name = confirmed_brand.strip()
         state.log("brand_override", {"brand_name": confirmed_brand.strip()})
@@ -607,16 +610,14 @@ def run_pipeline(
     _cb("biz", f"완료: {state.biz_info.brand_name} | {state.biz_info.industry} | {state.biz_info.confidence}")
 
     # ── Step 3: 경쟁사 + 질문 병렬 실행 ──
-    # BUG FIX: biz_info 확정 후 executor를 try/finally로 감싸서 누수 방지
     _cb("competitors", f"[{market_scope}] 경쟁사 분석 중...")
     _cb("questions",   "크롤 데이터 기반 타겟 질문 도출 중...")
 
-    t0         = time.time()
+    t0          = time.time()
     comp_future = None
     executor    = cf.ThreadPoolExecutor(max_workers=2)
 
     try:
-        # BUG FIX: biz_info가 확정된 상태에서 submit
         def _do_competitors():
             return discover_competitors(
                 client_gpt, client_gemini,
@@ -629,7 +630,6 @@ def run_pipeline(
 
         comp_future = executor.submit(_do_competitors)
 
-        # 질문 생성 (메인 스레드에서 직렬 실행 — biz + crawl 공유 state 사용)
         q_cache_key = cache.make_key(
             "pipeline_questions", url, state.biz_info.industry, q_engine
         )
@@ -650,8 +650,6 @@ def run_pipeline(
         state.record_time("question_gen", time.time() - t0)
         _cb("questions", f"완료: {len(state.questions)}개 질문 (content filter 통과)")
 
-        # 경쟁사 결과 수집
-        # BUG FIX: comp_future None 체크 추가
         if comp_future is not None:
             with CaptureError("comp_collect", log_level="warning") as ctx:
                 state.competitors = comp_future.result(timeout=60)
@@ -661,7 +659,6 @@ def run_pipeline(
         _cb("competitors", f"완료: {len(state.competitors)}개")
 
     finally:
-        # BUG FIX: 예외 발생 시에도 반드시 shutdown
         executor.shutdown(wait=False)
 
     # ── Step 4: Citation Spot-Check ──
@@ -705,7 +702,6 @@ def render_debug_panel(state: PipelineState):
         for i, (k, v) in enumerate(state.timing.items()):
             cols[i].metric(k, f"{v}s")
 
-    # BUG FIX: 마크다운 이스케이프 제거 (st.error는 마크다운 미지원)
     if state.errors:
         st.error("파이프라인 에러:\n" + "\n".join(f"• {e}" for e in state.errors))
 

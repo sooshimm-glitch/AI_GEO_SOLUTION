@@ -1,11 +1,13 @@
 """
-AI 클라이언트 래퍼 v4.2 — import-safe 버전
+AI 클라이언트 래퍼 v4.3
 
-변경사항:
-  - core.citation 임포트를 try/except로 보호 (연쇄 ImportError 방지)
+수정 사항:
+  - run_simulation: ThreadPoolExecutor를 try/finally + shutdown(wait=False) 로 교체
+    → timeout 후 executor가 block 없이 즉시 반환
+  - run_all_simulations: n 상한선 100 적용, wait() 패턴으로 교체
+    → pending future를 cancel 처리해 메모리 누수·hang 방지
+  - import-safe 버전 유지
   - google_search_retrieval 제거 (gemini-2.5 미지원 → 400 오류)
-  - Google Search Grounding 타임아웃 n*12초로 확장
-  - 브랜드 집계 패턴: 회사 접미사 → 조사 앞 명사로 교체
   - use_search=False (Search Grounding 비활성화 → 점유율 정상화)
 """
 
@@ -251,7 +253,6 @@ def _check_mention(resp, variants):
             continue
         if v.lower() in rl:
             return True
-        # 부분 매칭 (공백 제거)
         if v.lower().replace(" ", "") in rl.replace(" ", ""):
             return True
     return False
@@ -319,7 +320,13 @@ def _adaptive_batch(call_fn, question, brand_variants, n,
         if not resp:
             continue
         result = detect_citation(resp, brand_variants)
-        hit = result.cited or (count_mention and _check_mention(resp, brand_variants)) or (count_mention and bool(re.search(re.escape(brand_variants[0]) if brand_variants else 'NOMATCH', resp, re.IGNORECASE)))
+        no_match = 'NOMATCH'
+        pat = re.escape(brand_variants[0]) if brand_variants else no_match
+        hit = (
+            result.cited
+            or (count_mention and _check_mention(resp, brand_variants))
+            or (count_mention and bool(re.search(pat, resp, re.IGNORECASE)))
+        )
         if hit:
             probe_hits += 1
         if len(samples) < 3 and (result.response_sample or hit):
@@ -340,7 +347,12 @@ def _adaptive_batch(call_fn, question, brand_variants, n,
         if not resp:
             continue
         result = detect_citation(resp, brand_variants)
-        hit = result.cited or (count_mention and _check_mention(resp, brand_variants)) or (count_mention and bool(re.search(re.escape(brand_variants[0]) if brand_variants else 'NOMATCH', resp, re.IGNORECASE)))
+        pat = re.escape(brand_variants[0]) if brand_variants else 'NOMATCH'
+        hit = (
+            result.cited
+            or (count_mention and _check_mention(resp, brand_variants))
+            or (count_mention and bool(re.search(pat, resp, re.IGNORECASE)))
+        )
         if hit:
             hits += 1
         if len(samples) < 3 and (result.response_sample or hit):
@@ -382,14 +394,16 @@ def run_simulation(client_gpt, client_gemini, question, target_url, model_gpt,
 
     timeout = max(120, n * 4)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+    # FIX: try/finally + shutdown(wait=False) — timeout 후 executor가 block하지 않음
+    _sim_ex = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    try:
         futures = {}
         if client_gpt:
-            futures["gpt"] = ex.submit(_adaptive_batch, _gpt_call,
-                                        question, brand_variants, n, 0.05, False)
+            futures["gpt"] = _sim_ex.submit(_adaptive_batch, _gpt_call,
+                                             question, brand_variants, n, 0.05, False)
         if client_gemini:
-            futures["gem"] = ex.submit(_adaptive_batch, _gem_call,
-                                        question, brand_variants, n, 0.05, True)
+            futures["gem"] = _sim_ex.submit(_adaptive_batch, _gem_call,
+                                             question, brand_variants, n, 0.05, True)
 
         if "gpt" in futures:
             with CaptureError("gpt_future", log_level="warning") as ctx:
@@ -404,6 +418,8 @@ def run_simulation(client_gpt, client_gemini, question, target_url, model_gpt,
                 gem_ran = True
             if not ctx.ok:
                 logger.warning(f"Gemini simulation failed: {ctx.error}")
+    finally:
+        _sim_ex.shutdown(wait=False)
 
     merged_comp = _merge_mentions(gpt_comp, gem_comp)
     gpt_rate = round(gpt_hits / gpt_n * 100, 1) if gpt_ran and gpt_n > 0 else None
@@ -434,6 +450,9 @@ def run_simulation(client_gpt, client_gemini, question, target_url, model_gpt,
 
 def run_all_simulations(client_gpt, client_gemini, questions, target_url,
                         model_gpt, n=50, biz_info=None, tracker=None, use_cache=True):
+    # FIX: 상한선 100 — 사이드바 최대값과 동일, 무한 루프 방지
+    n = min(n, 100)
+
     def _empty():
         return SimResult(gpt_rate=None, gemini_rate=None, avg_rate=None,
                          gpt_hits=None, gemini_hits=None,
@@ -454,10 +473,20 @@ def run_all_simulations(client_gpt, client_gemini, questions, target_url,
             results[idx] = _empty()
 
     collect_timeout = max(300, n * 10)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(questions), 5)) as ex:
-        futs = {ex.submit(_one, i, q): i for i, q in enumerate(questions)}
-        for fut in concurrent.futures.as_completed(futs):
-            with CaptureError("collect", log_level="warning"):
-                fut.result(timeout=collect_timeout)
+
+    # FIX: try/finally + shutdown(wait=False) + wait() 패턴
+    # pending future는 cancel 처리 후 빈 결과로 채워 hang 방지
+    _all_ex = concurrent.futures.ThreadPoolExecutor(max_workers=min(len(questions), 5))
+    try:
+        futs = {_all_ex.submit(_one, i, q): i for i, q in enumerate(questions)}
+        done, pending = concurrent.futures.wait(futs, timeout=collect_timeout)
+        for fut in pending:
+            fut.cancel()
+            idx = futs[fut]
+            if results[idx] is None:
+                logger.warning(f"시뮬레이션 타임아웃 — 질문 {idx} 빈 결과로 대체")
+                results[idx] = _empty()
+    finally:
+        _all_ex.shutdown(wait=False)
 
     return [r if r is not None else _empty() for r in results]
