@@ -358,7 +358,13 @@ def render_strategy(strategy: dict, target_url: str):
     geo_guides = strategy.get("geo_guides", [])
     if geo_guides:
         st.caption("아래 항목을 적용하면 AI가 내 사이트를 더 자주 인용합니다.")
-        for i, g in enumerate(geo_guides):
+        # 번호(1. 2. 3.)로 시작하는 항목만 필터링 후 정확히 3개 표시
+        import re as _re
+        numbered = [g.strip() for g in geo_guides if _re.match(r'^\d+[.)]?\s', g.strip())]
+        # 번호 없는 항목도 있으면 포함 (최대 3개)
+        display_guides = numbered if numbered else [g for g in geo_guides if g.strip()]
+        display_guides = display_guides[:3]
+        for i, g in enumerate(display_guides):
             g_html = re.sub(r'\*\*(.*?)\*\*', rf'<strong style="color:{_text};">\1</strong>', g)
             g_html = g_html.replace('\n', '<br>')
             priority_color = ["#10B981","#F59E0B","#6366F1"][i % 3]
