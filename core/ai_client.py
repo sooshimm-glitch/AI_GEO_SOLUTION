@@ -365,10 +365,14 @@ def _adaptive_batch(call_fn, question, brand_variants, n,
         hit = bool(result.cited or check_hit or pat_hit)
         hits += hit
 
-        # 디버깅: Gemini 응답 샘플 로그 (처음 2개만)
-        if count_mention and len(samples) < 2:
-            logger.info(
-                f"[GEM_DEBUG] cited={result.cited}(conf={result.confidence:.2f}) "                f"check={check_hit} pat={pat_hit} "                f"resp='{resp[:120].replace(chr(10),' ')}'"
+        # 디버깅: 첫 응답 무조건 WARNING으로 출력 (브랜드 매칭 실패 원인 파악)
+        if count_mention and hits == 0 and empty_count == 0:
+            _resp_preview = resp[:150].replace('\n', ' ')
+            logger.warning(
+                f"[GEM_DEBUG] cited={result.cited}(conf={result.confidence:.2f}) "
+                f"check={check_hit} pat={pat_hit} "
+                f"variants={brand_variants[:3]} "
+                f"resp='{_resp_preview}'"
             )
 
         if len(samples) < 3 and (result.response_sample or hit):
