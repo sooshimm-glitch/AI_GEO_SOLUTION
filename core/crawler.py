@@ -309,7 +309,7 @@ def crawl(url: str, use_cache: bool = True) -> CrawlResult:
     if use_cache:
         key    = cache.make_key("crawl", url)
         cached = cache.get(key)
-        if cached:
+        if cached is not None:
             logger.info(f"Cache HIT: crawl({url})")
             return CrawlResult(
                 url          = cached.get("url",          url),
