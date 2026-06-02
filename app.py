@@ -167,6 +167,12 @@ div[data-testid="metric-container"] [data-testid="stMetricDelta"] svg{{display:n
     background:{_accent_gr}!important;color:white!important;
     box-shadow:0 4px 12px rgba(255,107,53,.3)!important}}
 .stTabs [data-baseweb="tab"] p,.stTabs [data-baseweb="tab"] span{{color:inherit!important}}
+/* 탭 hover 툴팁 제거 */
+.stTabs [data-baseweb="tab"]::after{{content:none!important}}
+.stTabs [data-baseweb="tab"][title]{{pointer-events:auto}}
+.stTabs [data-baseweb="tab"]:hover::before,.stTabs [data-baseweb="tab"]:hover::after{{display:none!important}}
+button[data-baseweb="tab"]{{-webkit-user-select:none}}
+button[data-baseweb="tab"][title]{{title:none}}
 
 /* 프로그레스 */
 .stProgress>div>div>div{{background:{_accent_gr}!important;border-radius:8px!important}}
@@ -919,6 +925,22 @@ with tab_hist:
                 else:
                     st.json(h)
 
+
+# ── 탭 툴팁 제거 (JS) ────────────────────────────────────────────────────────
+st.markdown("""
+<script>
+(function removeTitles() {
+    const clean = () => {
+        document.querySelectorAll('[data-baseweb="tab"]').forEach(el => {
+            el.removeAttribute('title');
+            el.removeAttribute('data-original-title');
+        });
+    };
+    clean();
+    new MutationObserver(clean).observe(document.body, { subtree: true, childList: true, attributes: true });
+})();
+</script>
+""", unsafe_allow_html=True)
 
 # ── 푸터 ─────────────────────────────────────────────────────────────────────
 st.markdown(f"""
