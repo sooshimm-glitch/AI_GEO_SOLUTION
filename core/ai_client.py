@@ -134,55 +134,45 @@ def call_gpt(client, prompt, system="", model="gpt-4o-mini",
 # ─────────────────────────────────────────────
 
 def _make_search_tool(genai):
-    try:
-        return [genai.protos.Tool(google_search=genai.protos.GoogleSearch())]
-    except Exception:
-        return None
+    """구 SDK 전용 — 현재 미사용"""
+    return None
 
 
 def call_gemini(model_obj, prompt, max_tokens=300, temperature=0.7,
                 tracker=None, use_search=False):
-    import google.generativeai as genai
-
-    search_tools = _make_search_tool(genai) if use_search else None
-
-    if search_tools:
-        gen_config = genai.types.GenerationConfig(max_output_tokens=max_tokens)
-    else:
-        gen_config = genai.types.GenerationConfig(
-            max_output_tokens=max_tokens, temperature=temperature)
-
-    response = None
+    """
+    신 SDK(google.genai) 사용.
+    model_obj: (api_key, model_name) 튜플로 전달받음.
+    """
     try:
-        if search_tools:
-            response = model_obj.generate_content(
-                prompt, tools=search_tools, generation_config=gen_config)
-        else:
-            response = model_obj.generate_content(
-                prompt, generation_config=gen_config)
+        import google.genai as genai
+        from google.genai import types as gtypes
 
-        try:
-            text = (response.text or "").strip()
-        except (ValueError, AttributeError):
-            text = ""
-            try:
-                for part in response.candidates[0].content.parts:
-                    if hasattr(part, "text") and part.text:
-                        text += part.text
-                text = text.strip()
-            except Exception:
-                pass
+        api_key, model_name = model_obj  # 신 SDK: 튜플로 전달
+
+        client = genai.Client(api_key=api_key)
+        cfg = gtypes.GenerateContentConfig(
+            max_output_tokens=max_tokens,
+            temperature=temperature,
+        )
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt,
+            config=cfg,
+        )
+        text = (response.text or "").strip()
+
+        if tracker and response.usage_metadata:
+            um = response.usage_metadata
+            tracker.add_gemini(
+                getattr(um, "prompt_token_count", 0),
+                getattr(um, "candidates_token_count", 0),
+            )
+        return text
 
     except Exception as e:
         logger.warning(f"Gemini call failed: {e}")
-        text = ""
-
-    if response and tracker and hasattr(response, "usage_metadata"):
-        um = response.usage_metadata
-        tracker.add_gemini(
-            getattr(um, "prompt_token_count", 0),
-            getattr(um, "candidates_token_count", 0))
-    return text
+        return ""
 
 
 # ─────────────────────────────────────────────
