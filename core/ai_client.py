@@ -391,10 +391,10 @@ def run_simulation(client_gpt, client_gemini, question, target_url, model_gpt,
     else:
         cache_key = None
 
-    # 브랜드명/도메인을 응답에 포함하도록 유도하는 system 프롬프트
+    # 브랜드명을 응답에 포함하도록 유도하는 system 프롬프트
     _sim_system = (
-        "당신은 AI 검색 엔진입니다. 질문에 답변할 때 관련 브랜드명, "
-        "서비스명, 웹사이트를 구체적으로 언급하세요."
+        "당신은 디지털 마케팅 전문가 AI입니다. "
+        "질문에 답변할 때 관련 브랜드명과 서비스명을 반드시 구체적으로 언급하세요."
     )
 
     def _gpt_call(q):
@@ -402,10 +402,43 @@ def run_simulation(client_gpt, client_gemini, question, target_url, model_gpt,
                         model=model_gpt, temperature=0.7, tracker=tracker)
 
     def _gem_call(q):
-        # Gemini: system 역할을 프롬프트 앞에 삽입
-        combined = f"{_sim_system}\n\n{q}"
-        return call_gemini(client_gemini, combined, max_tokens=1024,
-                           temperature=0.7, tracker=tracker, use_search=False)
+        # Gemini: system_instruction을 multi-turn으로 주입 (runtime 변경 불가)
+        # 방식: user→model 선행 대화로 역할 설정 후 실제 질문
+        import google.generativeai as genai
+        contents = [
+            {"role": "user",  "parts": [
+                "앞으로 답변할 때 관련 브랜드명과 서비스명을 반드시 구체적으로 언급해줘."                " 브랜드명을 포함한 목록 형식으로 답변해줘."
+            ]},
+            {"role": "model", "parts": [
+                "네, 관련 브랜드명과 서비스명을 구체적으로 포함해서 목록 형식으로 답변하겠습니다."                " 무엇이 궁금하신가요?"
+            ]},
+            {"role": "user",  "parts": [q]},
+        ]
+        try:
+            cfg = genai.types.GenerationConfig(
+                max_output_tokens=600, temperature=0.7)
+            resp = client_gemini.generate_content(contents, generation_config=cfg)
+            try:
+                text = (resp.text or "").strip()
+            except Exception:
+                text = ""
+                try:
+                    for part in resp.candidates[0].content.parts:
+                        if hasattr(part, "text") and part.text:
+                            text += part.text
+                    text = text.strip()
+                except Exception:
+                    pass
+            if tracker and hasattr(resp, "usage_metadata"):
+                um = resp.usage_metadata
+                tracker.add_gemini(
+                    getattr(um, "prompt_token_count", 0),
+                    getattr(um, "candidates_token_count", 0))
+            return text
+        except Exception as e:
+            logger.warning(f"Gemini multi-turn call failed: {e}")
+            return ""
+
 
     gpt_hits = 0; gpt_samples = []; gpt_n = 0; gpt_ran = False; gpt_comp = {}
     gem_hits = 0; gem_samples = []; gem_n = 0; gem_ran = False; gem_comp = {}
