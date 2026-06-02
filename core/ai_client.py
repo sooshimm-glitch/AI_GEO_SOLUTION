@@ -155,6 +155,7 @@ def call_gemini(model_obj, prompt, max_tokens=300, temperature=0.7,
             max_output_tokens=max_tokens,
             temperature=temperature,
         )
+        # model_name이 "models/xxx" 형식이면 그대로, 아니면 그대로
         response = client.models.generate_content(
             model=model_name,
             contents=prompt,
