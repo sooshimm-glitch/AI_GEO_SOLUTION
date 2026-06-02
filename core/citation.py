@@ -195,9 +195,9 @@ _CITATION_PATTERNS_EN = [
 ]
 
 _NEGATIVE_PATTERNS_KO = [
-    r"(?:하지\s*마세요|쓰지\s*마세요|피하세요|비추|불량|위험|사기|문제)",
-    r"(?:단점|불편|느림|비쌈|최악)",
-    r"(?:보다\s*나쁜|보다\s*못한|대신\s*사용)",
+    r"(?:하지\s*마세요|쓰지\s*마세요|피하세요|비추|불량|사기)",
+    r"(?:최악|형편없|사기꾼)",
+    r"(?:보다\s*나쁜|보다\s*못한)",
 ]
 
 _NEGATIVE_PATTERNS_EN = [
@@ -209,7 +209,7 @@ _ALL_CITATION = _CITATION_PATTERNS_KO + _CITATION_PATTERNS_EN
 _ALL_NEGATIVE = _NEGATIVE_PATTERNS_KO + _NEGATIVE_PATTERNS_EN
 
 
-def _check_context_window(text: str, pos: int, window: int = 80) -> tuple:
+def _check_context_window(text: str, pos: int, window: int = 40) -> tuple:
     if pos < 0:
         return "", False, 0.0
 
