@@ -220,11 +220,7 @@ class SimResult:
 # 브랜드 집계
 # ─────────────────────────────────────────────
 
-_KO_BRAND_PATTERNS = [
-    r'(?:^|\n)\s*(?:\d+[.)]\s*|[-•*]\s*)([가-힣a-zA-Z][가-힣a-zA-Z\s]{1,15}?)(?:\s*[-–(:]|\s*\n)',
-    r'([가-힣]{2,8})(?=\s*(?:은|는|이|가|을|를|의|에서|에게|으로|로|도|만|부터|까지)\b)',
-    r'\(([A-Z][A-Za-z\s]{2,20})\)',
-]
+# URL 패턴만으로 브랜드 추출 — 조사 기반 패턴은 일반명사 오탐이 너무 많아 제거
 _EN_BRAND_PATTERN  = r'\b([A-Z][a-zA-Z]{2,20}(?:\s[A-Z][a-zA-Z]+)?)\b'
 _MENTION_STOPWORDS = {
     "브랜드","제품","서비스","방법","기능","사용","이용","선택","추천","비교",
@@ -233,8 +229,14 @@ _MENTION_STOPWORDS = {
     "인기","유명","전문","일반","최고","최저","최신","기본","사이트","홈페이지",
     "The","This","That","Here","Also","And","But","For","With","From",
     "About","Like","Very","More","Most","Best","Good","Great","Top","New",
+    # 추가 — 뷰티/스킨케어 일반명사
+    "보습","세럼","토너","에센스","크림","선크림","클렌저","스킨케어","헤어케어",
+    "성분","피부","건성","지성","복합성","민감성","여드름","미백","주름","탄력",
+    "추출물","히알루론산","나이아신아마이드","레티놀","비타민","콜라겐","펩타이드",
+    # 일반 형용사/명사
+    "방석","통기성","편안함","회사","선택하","제공","구매하","사용하","추천하",
+    "효과","효능","방법","단계","관리","케어","루틴","기초","색조","메이크업",
 }
-_KO_JOSA_ENDINGS = ('으', '에', '을', '를', '이', '의', '은', '는', '가', '도', '만')
 
 
 def _strip_markdown(text):
@@ -258,34 +260,53 @@ def _check_mention(resp, variants):
 
 
 def _extract_mentions(resp):
+    """
+    AI 응답에서 브랜드/도메인 추출.
+    전략: URL 추출(고신뢰) + 영문 대문자 브랜드 + 번호 목록 첫 항목만.
+    한국어 조사 패턴은 일반명사 오탐이 많아 URL 기반으로 대체.
+    """
     if not resp:
         return {}
 
     clean = _strip_markdown(resp)
-
     result = {}
-    found = []
-    for pat in _KO_BRAND_PATTERNS:
-        for m in re.findall(pat, clean, re.MULTILINE):
-            b = m.strip() if isinstance(m, str) else m
-            if b and len(b) >= 2 and b not in _MENTION_STOPWORDS:
-                found.append(b)
+
+    # ── 1순위: URL에서 도메인 직접 추출 (가장 신뢰도 높음) ──
+    url_pat = r'https?://(?:www\.)?([^/\s\)\]\,]{3,40})'
+    for m in re.finditer(url_pat, resp):
+        domain = m.group(1).lower().split("/")[0]
+        stem   = domain.split(".")[0]
+        if len(stem) >= 2 and stem not in _MENTION_STOPWORDS and not stem.isdigit():
+            if domain not in result:
+                result[domain] = {"mentions": 0, "urls": []}
+            result[domain]["mentions"] += 1
+            if m.group(0) not in result[domain]["urls"]:
+                result[domain]["urls"].append(m.group(0))
+
+    # ── 2순위: 영문 대문자 브랜드 (Samsung, Amore 등) ──
     for m in re.finditer(_EN_BRAND_PATTERN, clean):
         b = m.group(1).strip()
         if b and len(b) >= 3 and b not in _MENTION_STOPWORDS:
-            found.append(b)
-    for b in found:
-        if b.endswith(_KO_JOSA_ENDINGS) or len(b) < 2 or b.isdigit():
-            continue
-        if len(b) > 12:
-            continue
-        result[b] = {"mentions": result.get(b, {}).get("mentions", 0) + 1, "urls": []}
+            if b not in result:
+                result[b] = {"mentions": 0, "urls": []}
+            result[b]["mentions"] += 1
 
-    url_pat = r'https?://[^\s\)\]\,]+'
-    for u in re.findall(url_pat, resp):
-        for b in result:
-            if b.lower().replace(" ", "") in u.lower() and u not in result[b]["urls"]:
-                result[b]["urls"].append(u)
+    # ── 3순위: 번호 목록 항목 추출 (1. 브랜드명 형태) — 2글자 이상 한글/영문 ──
+    list_pat = r'(?:^|\n)\s*\d+[.)]\ +([가-힣A-Za-z][가-힣A-Za-z0-9\s]{1,20}?)(?:[:\s]|$)'
+    for m in re.finditer(list_pat, clean, re.MULTILINE):
+        b = m.group(1).strip()
+        # 일반명사/동사로 끝나면 제외
+        if not b or len(b) < 2 or len(b) > 20:
+            continue
+        if b in _MENTION_STOPWORDS:
+            continue
+        # 순수 동사/형용사 어미로 끝나면 제외
+        if re.search(r'[하되며어아요서]$', b):
+            continue
+        if b not in result:
+            result[b] = {"mentions": 0, "urls": []}
+        result[b]["mentions"] += 1
+
     return result
 
 
