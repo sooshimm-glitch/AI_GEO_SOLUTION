@@ -336,7 +336,7 @@ def _adaptive_batch(call_fn, question, brand_variants, n,
 
     def _one_call(_):
         resp = ""
-        with CaptureError("batch_call", log_level="debug"):
+        with CaptureError("batch_call", log_level="warning"):
             resp = call_fn(question)
         return resp
 
@@ -411,41 +411,19 @@ def run_simulation(client_gpt, client_gemini, question, target_url, model_gpt,
                         model=model_gpt, temperature=0.7, tracker=tracker)
 
     def _gem_call(q):
-        # Gemini: system_instruction을 multi-turn으로 주입 (runtime 변경 불가)
-        # 방식: user→model 선행 대화로 역할 설정 후 실제 질문
-        import google.generativeai as genai
-        contents = [
-            {"role": "user",  "parts": [
-                "앞으로 답변할 때 관련 브랜드명과 서비스명을 반드시 구체적으로 언급해줘."                " 브랜드명을 포함한 목록 형식으로 답변해줘."
-            ]},
-            {"role": "model", "parts": [
-                "네, 관련 브랜드명과 서비스명을 구체적으로 포함해서 목록 형식으로 답변하겠습니다."                " 무엇이 궁금하신가요?"
-            ]},
-            {"role": "user",  "parts": [q]},
-        ]
+        prompt = (
+            f"{q}\n\n"
+            f"답변 시 관련 브랜드명과 서비스명을 반드시 포함해서 답해줘. "
+            f"예: '1. 브랜드A - 특징' 형식으로."
+        )
         try:
-            cfg = genai.types.GenerationConfig(
-                max_output_tokens=600, temperature=0.7)
-            resp = client_gemini.generate_content(contents, generation_config=cfg)
-            try:
-                text = (resp.text or "").strip()
-            except Exception:
-                text = ""
-                try:
-                    for part in resp.candidates[0].content.parts:
-                        if hasattr(part, "text") and part.text:
-                            text += part.text
-                    text = text.strip()
-                except Exception:
-                    pass
-            if tracker and hasattr(resp, "usage_metadata"):
-                um = resp.usage_metadata
-                tracker.add_gemini(
-                    getattr(um, "prompt_token_count", 0),
-                    getattr(um, "candidates_token_count", 0))
-            return text
+            result = call_gemini(client_gemini, prompt, max_tokens=600,
+                                 temperature=0.7, tracker=tracker, use_search=False)
+            if not result:
+                logger.warning("[GEM_CALL] 빈 응답 — Gemini API가 빈 문자열 반환")
+            return result
         except Exception as e:
-            logger.warning(f"Gemini multi-turn call failed: {e}")
+            logger.warning(f"[GEM_CALL] 예외 발생: {type(e).__name__}: {e}")
             return ""
 
 
