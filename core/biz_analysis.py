@@ -145,10 +145,9 @@ def generate_target_questions(
         "questions", _QUESTION_VERSION, url, biz_info.industry, engine, model_gpt
     )
 
-    # BUG FIX: cache.get() 단일값 반환
     if use_cache:
         cached = cache.get(cache_key)
-        if cached:
+        if cached is not None:
             logger.info(f"Cache HIT: questions({domain})")
             return cached
 
@@ -192,9 +191,9 @@ def generate_target_questions(
                                   max_tokens=600, model=model_gpt, temperature=0.85)
 
     if not ctx.ok:
-        raise RuntimeError(f"질문 생성 실패: {ctx.error}")
+        logger.warning(f"질문 생성 실패 ({domain}): {ctx.error} — 폴백 사용")
 
-    questions = _parse_questions(result_str)
+    questions = _parse_questions(result_str) if result_str else []
     if len(questions) < 3:
         questions = _fallback_questions(biz_info)
 
@@ -303,7 +302,7 @@ def run_strategy_analysis(
     # BUG FIX: cache.get() 단일값
     if use_cache:
         cached = cache.get(cache_key)
-        if cached:
+        if cached is not None:
             logger.info(f"Cache HIT: strategy({rep_question[:30]}...)")
             return cached
 
