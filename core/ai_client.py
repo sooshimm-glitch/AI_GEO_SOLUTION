@@ -346,7 +346,7 @@ def _adaptive_batch(call_fn, question, brand_variants, n,
         responses = []
         for fut in concurrent.futures.as_completed(futs):
             try:
-                responses.append(fut.result(timeout=30))
+                responses.append(fut.result(timeout=60))
             except Exception:
                 responses.append("")
 
@@ -391,12 +391,20 @@ def run_simulation(client_gpt, client_gemini, question, target_url, model_gpt,
     else:
         cache_key = None
 
+    # 브랜드명/도메인을 응답에 포함하도록 유도하는 system 프롬프트
+    _sim_system = (
+        "당신은 AI 검색 엔진입니다. 질문에 답변할 때 관련 브랜드명, "
+        "서비스명, 웹사이트를 구체적으로 언급하세요."
+    )
+
     def _gpt_call(q):
-        return call_gpt(client_gpt, q, max_tokens=300,
+        return call_gpt(client_gpt, q, system=_sim_system, max_tokens=400,
                         model=model_gpt, temperature=0.7, tracker=tracker)
 
     def _gem_call(q):
-        return call_gemini(client_gemini, q, max_tokens=1024,
+        # Gemini: system 역할을 프롬프트 앞에 삽입
+        combined = f"{_sim_system}\n\n{q}"
+        return call_gemini(client_gemini, combined, max_tokens=1024,
                            temperature=0.7, tracker=tracker, use_search=False)
 
     gpt_hits = 0; gpt_samples = []; gpt_n = 0; gpt_ran = False; gpt_comp = {}
