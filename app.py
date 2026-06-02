@@ -14,10 +14,7 @@ import sys, os
 _APP_ROOT = os.path.dirname(os.path.abspath(__file__))
 if _APP_ROOT not in sys.path:
     sys.path.insert(0, _APP_ROOT)
-# Streamlit Cloud 배포 경로 (로컬/다른 환경에서는 무시)
-_CLOUD_PATH = "/mount/src/ai_geo_solution"
-if os.path.isdir(_CLOUD_PATH) and _CLOUD_PATH not in sys.path:
-    sys.path.insert(0, _CLOUD_PATH)
+sys.path.insert(0, "/mount/src/ai_geo_solution")
 
 try:
     from core.cache import get_cache
@@ -307,14 +304,55 @@ def render_bar_chart(results: list, questions: list, title: str = "AI 엔진별 
 
 def render_strategy(strategy: dict, target_url: str):
     domain = extract_domain(target_url)
-    st.markdown("### 🏆 AI 인용 경쟁 현황 (TOP 5)")
+    # 실측 competitor_mentions 집계 (sim_results에서 전달됨)
+    measured = strategy.get("measured_competitors", {})
+    competitors_ai = strategy.get("competitors", [])[:5]
+
+    if measured:
+        st.markdown("### 🏆 AI 인용 경쟁 현황 (실측 기반)")
+        st.caption("실제 시뮬레이션 응답에서 언급된 브랜드 빈도입니다.")
+        sorted_measured = sorted(measured.items(), key=lambda x: x[1].get("mentions", 0), reverse=True)[:5]
+        for rank, (brand, data) in enumerate(sorted_measured, 1):
+            mentions = data.get("mentions", 0)
+            urls     = data.get("urls", [])
+            domain   = urls[0].replace("https://","").replace("http://","").split("/")[0] if urls else ""
+            is_t     = extract_domain(target_url).lower() in brand.lower()
+            if _dark:
+                bg = "linear-gradient(135deg,#2A2A2A,#333)" if is_t else "#1E1E1E"
+                bd = "#888" if is_t else "#333"
+            else:
+                bg = "linear-gradient(135deg,#EEE,#E0E0E0)" if is_t else "#F8F8F8"
+                bd = "#111" if is_t else "#DDD"
+            lbl = " ← 내 사이트" if is_t else ""
+            st.markdown(f"""
+            <div style="display:flex;align-items:center;justify-content:space-between;
+                padding:11px 16px;border-radius:10px;margin:5px 0;
+                background:{bg};border:1.5px solid {bd};">
+                <div style="display:flex;align-items:center;gap:12px;">
+                    <div style="width:28px;height:28px;border-radius:8px;
+                        background:linear-gradient(135deg,#111,#444);
+                        color:white;font-weight:700;font-size:.8rem;
+                        display:flex;align-items:center;justify-content:center;">{rank}</div>
+                    <span style="font-weight:{'700' if is_t else '500'};color:{_text};font-size:.9rem;">
+                        {brand}{lbl}
+                        <span style="color:{_text_muted};font-size:.78rem;margin-left:6px;">{domain}</span>
+                    </span>
+                </div>
+                <span style="background:#1d4ed8;color:white;padding:2px 10px;border-radius:20px;font-size:.75rem;font-weight:700;">
+                    {mentions}회 언급
+                </span>
+            </div>""", unsafe_allow_html=True)
+    elif competitors_ai:
+        st.markdown("### 🏆 AI 인용 경쟁 현황 (AI 추정)")
+        st.caption("⚠️ 실측 데이터 없음 — AI가 추정한 경쟁 현황입니다. 실제 점유율과 다를 수 있습니다.")
+
     pos_colors = {
         "업계1위":"#10B981","업계 1위":"#10B981",
         "신흥강자":"#F59E0B","신흥 강자":"#F59E0B",
         "틈새전문":"#6366F1","틈새 전문":"#6366F1",
     }
-    competitors = strategy.get("competitors", [])[:5]
-    if competitors:
+    competitors = competitors_ai
+    if not measured and competitors:
         for comp in competitors:
             r=comp.get("rank","?"); d=comp.get("domain",""); b=comp.get("brand_name",d)
             reason=comp.get("reason",""); pos=comp.get("position",comp.get("market_position",""))
@@ -343,7 +381,7 @@ def render_strategy(strategy: dict, target_url: str):
                 </div>
                 <span style="color:{_text_muted};font-size:.8rem;">{reason}</span>
             </div>""", unsafe_allow_html=True)
-    else:
+    if not measured and not competitors_ai:
         st.caption("경쟁사 정보를 가져오지 못했습니다.")
 
     st.markdown(f"<hr style='border:none;height:1px;background:linear-gradient(90deg,transparent,{_border},transparent);margin:20px 0;'>", unsafe_allow_html=True)
@@ -635,6 +673,18 @@ with tab_main:
             prog.progress(0.7)
 
             stat.markdown("🧠 **전략 분석 생성 중...**")
+            # all_results의 실측 competitor_mentions 집계
+            merged_mentions: dict = {}
+            for _r in all_results:
+                _cm = _r.competitor_mentions if hasattr(_r, "competitor_mentions") else (_r.get("competitor_mentions") if isinstance(_r, dict) else {})
+                for _brand, _data in (_cm or {}).items():
+                    if _brand not in merged_mentions:
+                        merged_mentions[_brand] = {"mentions": 0, "urls": []}
+                    merged_mentions[_brand]["mentions"] += _data.get("mentions", 0)
+                    merged_mentions[_brand]["urls"] = list(set(
+                        merged_mentions[_brand]["urls"] + _data.get("urls", [])
+                    ))
+
             with CaptureError("strategy", log_level="warning") as s_ctx:
                 strategy = run_strategy_analysis(
                     client_gpt, client_gemini,
@@ -648,6 +698,10 @@ with tab_main:
                     market_scope=market_scope,
                     use_cache=True,
                 )
+
+            # 실측 경쟁사 데이터를 strategy에 주입
+            if strategy and merged_mentions:
+                strategy["measured_competitors"] = merged_mentions
 
             prog.progress(1.0)
 
