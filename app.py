@@ -708,6 +708,55 @@ st.markdown(f"""
 
 client_gpt, client_gemini = get_clients()
 
+# ── Gemini 단독 테스트 ────────────────────────────────────────────────────────
+with st.expander("🧪 Gemini 연결 테스트 (디버그용)", expanded=False):
+    test_q = st.text_input("테스트 질문", value="네이버 같은 포털 사이트 추천해줘?", key="gem_test_q")
+    if st.button("Gemini 직접 호출", key="btn_gem_test"):
+        if not gemini_ok:
+            st.error("Gemini API 키를 먼저 입력하세요.")
+        else:
+            with st.spinner("Gemini 호출 중..."):
+                try:
+                    import google.generativeai as genai
+                    st.write(f"모델명: `{gemini_model_name}`")
+                    _test_resp = client_gemini.generate_content(
+                        test_q,
+                        generation_config=genai.types.GenerationConfig(
+                            max_output_tokens=300, temperature=0.7)
+                    )
+                    try:
+                        _text = _test_resp.text or ""
+                    except Exception:
+                        _text = ""
+                        try:
+                            for _p in _test_resp.candidates[0].content.parts:
+                                if hasattr(_p, "text"): _text += _p.text
+                        except Exception:
+                            pass
+                    if _text:
+                        st.success("✅ Gemini 응답 성공")
+                        st.code(_text[:500])
+                        # 브랜드 매칭 테스트
+                        from core.citation import build_brand_variants, detect_citation
+                        _url = url_input.strip() if 'url_input' in st.session_state else ""
+                        _brand = brand_input.strip() if 'brand_input' in st.session_state else ""
+                        if _url and _brand:
+                            _variants = build_brand_variants(
+                                ("https://"+_url if not _url.startswith("http") else _url),
+                                {"brand_name": _brand}
+                            )
+                            st.write(f"brand_variants: `{_variants}`")
+                            _result = detect_citation(_text, _variants)
+                            from core.ai_client import _check_mention
+                            _cm = _check_mention(_text, _variants)
+                            st.write(f"detect_citation: cited=`{_result.cited}` conf=`{_result.confidence:.2f}`")
+                            st.write(f"_check_mention: `{_cm}`")
+                    else:
+                        st.error("❌ Gemini 응답이 빈 문자열")
+                        st.write("candidates:", _test_resp.candidates if hasattr(_test_resp, "candidates") else "없음")
+                except Exception as e:
+                    st.error(f"❌ 예외 발생: {type(e).__name__}: {e}")
+
 # ── 탭 ───────────────────────────────────────────────────────────────────────
 tab_main, tab_hist = st.tabs(["📊 인용 점유율 분석", "🕘 히스토리"])
 
