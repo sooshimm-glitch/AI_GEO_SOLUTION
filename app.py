@@ -691,9 +691,8 @@ def get_clients():
             client_gpt = openai.OpenAI(api_key=openai_key)
     if gemini_ok:
         with CaptureError("init_gemini", log_level="error"):
-            import google.generativeai as genai
-            genai.configure(api_key=gemini_key)
-            client_gemini = genai.GenerativeModel(gemini_model_name)
+            # 신 SDK(google.genai): Client를 매번 생성하므로 (api_key, model_name) 튜플 전달
+            client_gemini = (gemini_key, gemini_model_name)
     return client_gpt, client_gemini
 
 
@@ -722,22 +721,18 @@ with st.expander("🧪 Gemini 연결 테스트 (디버그용)", expanded=False):
         else:
             with st.spinner("Gemini 호출 중..."):
                 try:
-                    import google.generativeai as genai
-                    st.write(f"모델명: `{gemini_model_name}`")
-                    _test_resp = client_gemini.generate_content(
-                        test_q,
-                        generation_config=genai.types.GenerationConfig(
+                    import google.genai as genai
+                    from google.genai import types as gtypes
+                    _api_key, _model_name = client_gemini
+                    st.write(f"모델명: `{_model_name}`")
+                    _client = genai.Client(api_key=_api_key)
+                    _test_resp = _client.models.generate_content(
+                        model=_model_name,
+                        contents=test_q,
+                        config=gtypes.GenerateContentConfig(
                             max_output_tokens=300, temperature=0.7)
                     )
-                    try:
-                        _text = _test_resp.text or ""
-                    except Exception:
-                        _text = ""
-                        try:
-                            for _p in _test_resp.candidates[0].content.parts:
-                                if hasattr(_p, "text"): _text += _p.text
-                        except Exception:
-                            pass
+                    _text = (_test_resp.text or "").strip()
                     if _text:
                         st.success("✅ Gemini 응답 성공")
                         st.code(_text[:500])
