@@ -72,7 +72,7 @@ if _dark:
     _text     = "#F2F2F2"
     _text_muted = "#888888"
     _shadow   = "0 4px 20px rgba(0,0,0,.6)"
-    _sidebar_bg = "#111111"
+    _sidebar_bg = "#FFFFFF"
     _accent   = "#FF6B35"   # 오렌지
     _accent2  = "#FF4D8B"   # 핑크
     _accent_gr = "linear-gradient(135deg,#FF6B35,#FF4D8B)"
@@ -90,7 +90,7 @@ else:
     _text     = "#1A1A1A"
     _text_muted = "#888888"
     _shadow   = "0 4px 20px rgba(255,107,53,.1)"
-    _sidebar_bg = "#1A1A1A"
+    _sidebar_bg = "#FFFFFF"
     _accent   = "#FF6B35"
     _accent2  = "#FF4D8B"
     _accent_gr = "linear-gradient(135deg,#FF6B35,#FF4D8B)"
@@ -172,16 +172,16 @@ div[data-testid="metric-container"] [data-testid="stMetricDelta"] svg{{display:n
 .stProgress>div>div>div{{background:{_accent_gr}!important;border-radius:8px!important}}
 
 /* 사이드바 */
-[data-testid="stSidebar"]{{background:{_sidebar_bg}!important}}
-[data-testid="stSidebar"] *:not(.stButton>button){{color:white!important}}
+[data-testid="stSidebar"]{{background:{_sidebar_bg}!important;border-right:1.5px solid {_border}!important}}
+[data-testid="stSidebar"] *:not(.stButton>button){{color:{_text}!important;-webkit-text-fill-color:{_text}!important}}
 [data-testid="stSidebar"] .stTextInput>div>div>input{{
-    background:rgba(255,255,255,.1)!important;border:1px solid rgba(255,255,255,.2)!important;color:white!important}}
+    background:{_bg2}!important;border:1.5px solid {_border}!important;color:{_text}!important}}
 [data-testid="stSidebar"] .stSelectbox>div>div{{
-    background:rgba(255,255,255,.08)!important;border:1px solid rgba(255,255,255,.2)!important}}
-[data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] span{{color:white!important}}
+    background:{_bg2}!important;border:1.5px solid {_border}!important}}
+[data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] span{{color:{_text}!important}}
 [data-testid="stSidebar"] .stButton>button{{
-    background:rgba(255,255,255,.1)!important;
-    box-shadow:none!important;border:1px solid rgba(255,255,255,.2)!important}}
+    background:{_accent_gr}!important;
+    box-shadow:0 4px 12px rgba(255,107,53,.3)!important;border:none!important}}
 
 /* expander */
 [data-testid="stExpander"]{{background:{_card}!important;border:1.5px solid {_border}!important;border-radius:14px!important}}
@@ -595,9 +595,9 @@ def render_strategy(strategy: dict, target_url: str):
 # ── 사이드바 ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown(f"""
-    <div style="text-align:center;padding:20px 0 24px;border-bottom:1px solid rgba(255,255,255,.12);margin-bottom:20px">
+    <div style="text-align:center;padding:20px 0 24px;border-bottom:1.5px solid {_border};margin-bottom:20px">
         <div style="font-size:2rem;margin-bottom:6px">🔍</div>
-        <div style="color:white;font-size:1rem;font-weight:800">AI Citation Analyzer</div>
+        <div style="color:{_text};font-size:1rem;font-weight:800">AI Citation Analyzer</div>
         <div style="background:{_accent_gr};color:white;font-size:.65rem;font-weight:700;
             padding:2px 10px;border-radius:20px;display:inline-block;margin-top:4px">v4.0</div>
     </div>""", unsafe_allow_html=True)
@@ -631,8 +631,8 @@ with st.sidebar:
     cost_summary = tracker.summary()
     if cost_summary["api_calls"] > 0:
         st.markdown(f"""
-        <div style="background:rgba(255,107,53,.15);border:1px solid rgba(255,107,53,.3);
-            border-radius:8px;padding:10px 12px;margin-top:8px;font-size:.75rem;color:rgba(255,255,255,.85)">
+        <div style="background:rgba(255,107,53,.08);border:1px solid rgba(255,107,53,.25);
+            border-radius:8px;padding:10px 12px;margin-top:8px;font-size:.75rem;color:{_text}">
             💰 누적 비용: ~${cost_summary['estimated_usd']:.4f}<br>
             🔢 API 호출: {cost_summary['api_calls']}회
         </div>""", unsafe_allow_html=True)
@@ -640,8 +640,8 @@ with st.sidebar:
     cache_stats = _cache.stats()
     if cache_stats["entries"] > 0:
         st.markdown(f"""
-        <div style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);
-            border-radius:8px;padding:8px 12px;margin-top:6px;font-size:.72rem;color:rgba(255,255,255,.7)">
+        <div style="background:{_bg2};border:1px solid {_border};
+            border-radius:8px;padding:8px 12px;margin-top:6px;font-size:.72rem;color:{_text_muted}">
             ⚡ 캐시 히트율: {cache_stats['hit_rate']}% ({cache_stats['entries']}개)
         </div>""", unsafe_allow_html=True)
 
@@ -706,9 +706,9 @@ with tab_main:
 
     col_u, col_b = st.columns([2, 1])
     with col_u:
-        url_input = st.text_input("🌐 사이트 URL *", placeholder="예) torridan.com", key="url_input")
+        url_input = st.text_input("🌐 사이트 URL *", placeholder="example.com", key="url_input")
     with col_b:
-        brand_input = st.text_input("🏷️ 브랜드명 *", placeholder="예) 토리든", key="brand_input")
+        brand_input = st.text_input("🏷️ 브랜드명 *", placeholder="", key="brand_input")
 
     q_count = st.session_state["q_count"]
     st.markdown(f"""
@@ -724,7 +724,7 @@ with tab_main:
             q = st.text_input(
                 f"Q{idx+1}",
                 value=st.session_state["questions_list"][idx] if idx < len(st.session_state["questions_list"]) else "",
-                placeholder="예) 토리든 스킨케어 추천해줘?" if idx == 0 else f"질문 {idx+1}번",
+                placeholder="",
                 key=f"q_dyn_{idx}", label_visibility="visible"
             )
             if idx < len(st.session_state["questions_list"]):
