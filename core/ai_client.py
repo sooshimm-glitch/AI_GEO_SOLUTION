@@ -351,23 +351,32 @@ def _adaptive_batch(call_fn, question, brand_variants, n,
                 responses.append("")
 
     hits = 0
+    empty_count = 0
     samples = []
     all_mentions = {}
 
     for resp in responses:
         if not resp:
+            empty_count += 1
             continue
         result = detect_citation(resp, brand_variants)
-        # 응답 1개당 hit은 bool → 브랜드명+도메인 동시 등장해도 +1만
-        hit = bool(
-            result.cited
-            or (count_mention and _check_mention(resp, brand_variants))
-            or (count_mention and first_pat.search(resp))
-        )
+        check_hit = _check_mention(resp, brand_variants) if count_mention else False
+        pat_hit   = bool(first_pat.search(resp))         if count_mention else False
+        hit = bool(result.cited or check_hit or pat_hit)
         hits += hit
+
+        # 디버깅: Gemini 응답 샘플 로그 (처음 2개만)
+        if count_mention and len(samples) < 2:
+            logger.info(
+                f"[GEM_DEBUG] cited={result.cited}(conf={result.confidence:.2f}) "                f"check={check_hit} pat={pat_hit} "                f"resp='{resp[:120].replace(chr(10),' ')}'"
+            )
+
         if len(samples) < 3 and (result.response_sample or hit):
             samples.append(result.response_sample or resp[:200])
         all_mentions = _merge_mentions(all_mentions, _extract_mentions(resp))
+
+    if empty_count > 0:
+        logger.warning(f"[BATCH] 빈 응답 {empty_count}/{n}개 — API 오류 또는 timeout")
 
     return hits, samples, n, all_mentions
 
