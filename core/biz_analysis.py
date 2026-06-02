@@ -145,6 +145,7 @@ def generate_target_questions(
         "questions", _QUESTION_VERSION, url, biz_info.industry, engine, model_gpt
     )
 
+    # BUG FIX: cache.get() 단일값 반환
     if use_cache:
         cached = cache.get(cache_key)
         if cached is not None:
@@ -191,7 +192,7 @@ def generate_target_questions(
                                   max_tokens=600, model=model_gpt, temperature=0.85)
 
     if not ctx.ok:
-        logger.warning(f"질문 생성 실패 ({domain}): {ctx.error} — 폴백 사용")
+        logger.warning(f"질문 생성 실패: {ctx.error} — 폴백 사용")
 
     questions = _parse_questions(result_str) if result_str else []
     if len(questions) < 3:
@@ -396,11 +397,26 @@ JSON 배열만 출력 (다른 텍스트 없이):
         return items or ["데이터 부족으로 분석 불가"]
 
     def _keywords() -> list[str]:
+        # biz.industry가 비어있거나 generic하면 brand_name + domain으로 보완
+        industry_ctx = biz.industry if biz.industry and biz.industry not in ("기타 서비스", "서비스") else biz.brand_name
         prompt = (
-            f'{biz.industry} 분야에서 AI 인용 확률 높은 블루오션 키워드 5개를 한국어로 추천해주세요.\n'
-            f'조건: 경쟁이 적고 전문성 높은 틈새 키워드. {scope_inst}\n'
-            f'반드시 한국어 키워드만. 영어 금지. 키워드만 한 줄에 하나씩 출력:'
+            f'다음 브랜드/서비스의 AI 인용 확률이 높은 블루오션 키워드 5개를 추천해주세요.\n'
+            f'\n'
+            f'[분석 대상]\n'
+            f'- 브랜드: {biz.brand_name}\n'
+            f'- 도메인: {domain}\n'
+            f'- 업종/서비스: {industry_ctx}\n'
+            f'- 핵심 서비스: {biz.core_product}\n'
+            f'\n'
+            f'[조건]\n'
+            f'- ChatGPT, Gemini, Perplexity 등 AI 검색에서 {biz.brand_name}이 인용될 가능성이 높은 키워드\n'
+            f'- 경쟁이 적고 전문성 높은 틈새 키워드 (너무 일반적인 단어 제외)\n'
+            f'- {scope_inst}\n'
+            f'- 반드시 한국어 키워드구 형태로만 (영어 금지)\n'
+            f'\n'
+            f'키워드만 한 줄에 하나씩 5개 출력 (번호, 설명 없이):'
         )
+        r = ""  # BUG FIX: r 초기화 — CaptureError 예외 억제 시 NameError 방지
         with CaptureError("strategy_kw", log_level="warning"):
             r = (
                 call_gemini(client_gemini, prompt, max_tokens=600, temperature=0.7)
@@ -413,7 +429,7 @@ JSON 배열만 출력 (다른 텍스트 없이):
             for k in r.split("\n")
             if k.strip() and len(k.strip()) > 2
         ][:5]
-        return items or ["분석 중 오류"]
+        return items or ["키워드 분석 실패 — API 응답 없음"]
 
     def _geo() -> list[str]:
         prompt = (
