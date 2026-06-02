@@ -495,24 +495,27 @@ def render_strategy(strategy: dict, target_url: str):
     if measured:
         items = sorted(measured.items(), key=lambda x: x[1].get("mentions", 0), reverse=True)[:5]
         for rank, (brand, data) in enumerate(items, 1):
-            mentions = data.get("mentions", 0)
-            urls     = data.get("urls", [])
-            dom      = urls[0].replace("https://","").replace("http://","").split("/")[0] if urls else ""
-            is_mine  = target_domain.lower() in brand.lower()
-            mine_cls = "mine" if is_mine else ""
-            st.markdown(f"""
-            <div class="aca-competitor-row {mine_cls}">
-                <div style="display:flex;align-items:center;gap:12px">
-                    <div style="width:26px;height:26px;border-radius:8px;display:flex;align-items:center;justify-content:center;
-                        font-size:.78rem;font-weight:800;color:white;background:{_accent_gr}">{rank}</div>
-                    <div>
-                        <span style="font-weight:{'700' if is_mine else '500'};font-size:.9rem;color:{_text}">{brand}</span>
-                        {"<span style='margin-left:6px;font-size:.7rem;font-weight:700;color:white;background:" + _accent + ";padding:1px 7px;border-radius:20px'>내 사이트</span>" if is_mine else ""}
-                        {f'<div style="font-size:.75rem;color:{_text_muted}">{dom}</div>' if dom else ""}
-                    </div>
-                </div>
-                <span style="background:#1D4ED8;color:white;padding:2px 10px;border-radius:20px;font-size:.75rem;font-weight:700">{mentions}회 언급</span>
-            </div>""", unsafe_allow_html=True)
+            mentions  = data.get("mentions", 0)
+            urls      = data.get("urls", [])
+            dom       = urls[0].replace("https://","").replace("http://","").split("/")[0] if urls else ""
+            is_mine   = target_domain.lower() in brand.lower()
+            row_style = f"background:rgba(255,107,53,.08);border:1.5px solid {_accent}" if is_mine else f"background:{_bg2};border:1.5px solid {_border}"
+            fw        = "700" if is_mine else "500"
+            mine_badge = f'<span style="margin-left:6px;font-size:.68rem;font-weight:700;color:white;background:{_accent};padding:1px 7px;border-radius:20px">내 사이트</span>' if is_mine else ""
+            dom_div   = f'<div style="font-size:.73rem;color:{_text_muted};margin-top:1px">{dom}</div>' if dom else ""
+            st.markdown(
+                f'<div style="display:flex;align-items:center;justify-content:space-between;'
+                f'padding:10px 16px;border-radius:10px;margin:5px 0;{row_style}">'
+                f'<div style="display:flex;align-items:center;gap:12px">'
+                f'<div style="width:26px;height:26px;border-radius:8px;display:flex;align-items:center;'
+                f'justify-content:center;font-size:.78rem;font-weight:800;color:white;'
+                f'background:{_accent_gr}">{rank}</div>'
+                f'<div><span style="font-weight:{fw};font-size:.9rem;color:{_text}">{brand}</span>'
+                f'{mine_badge}{dom_div}</div></div>'
+                f'<span style="background:#1D4ED8;color:white;padding:2px 10px;border-radius:20px;'
+                f'font-size:.75rem;font-weight:700">{mentions}회 언급</span></div>',
+                unsafe_allow_html=True,
+            )
     else:
         for comp in competitors_ai:
             r   = comp.get("rank","?")
