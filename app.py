@@ -14,7 +14,10 @@ import sys, os
 _APP_ROOT = os.path.dirname(os.path.abspath(__file__))
 if _APP_ROOT not in sys.path:
     sys.path.insert(0, _APP_ROOT)
-sys.path.insert(0, "/mount/src/ai_geo_solution")
+# Streamlit Cloud 배포 경로 (로컬/다른 환경에서는 무시)
+_CLOUD_PATH = "/mount/src/ai_geo_solution"
+if os.path.isdir(_CLOUD_PATH) and _CLOUD_PATH not in sys.path:
+    sys.path.insert(0, _CLOUD_PATH)
 
 try:
     from core.cache import get_cache
