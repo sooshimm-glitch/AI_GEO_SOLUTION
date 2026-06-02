@@ -334,6 +334,16 @@ def run_strategy_analysis(
         if lines:
             sim_ctx = "\n[시뮬레이션 결과 요약]\n" + "\n".join(lines)
 
+    # ── 사이트 크롤 (diagnosis/keywords 프롬프트 품질 향상) ──
+    site_content = ""
+    if target_url:
+        with CaptureError("strategy_crawl", log_level="info"):
+            crawl_result = crawl(target_url, use_cache=True)
+            if crawl_result.ok and crawl_result.body_text:
+                site_content = crawl_result.summary(max_len=1500)
+    if not site_content:
+        site_content = f"{domain} ({biz.brand_name}) — 크롤 데이터 없음"
+
     # ── 병렬 4개 작업 ──
 
     def _competitors_fn() -> list:
@@ -381,40 +391,40 @@ JSON 배열만 출력 (다른 텍스트 없이):
 
     def _diagnosis() -> list[str]:
         prompt = (
-            f'{domain} ({biz.brand_name}, {biz.industry})이 "{rep_question}"에서 '
-            f'AI 인용 점유율이 낮은 원인 3가지.\n'
-            f'{sim_ctx}\n'
-            f'경쟁사 대비 구체적 문제점. 각 항목 50자 이내. 반드시 한국어로. 번호 없이 한 줄씩:'
+            f'아래는 {domain} ({biz.brand_name})의 실제 사이트 내용입니다.\n\n'
+            f'[사이트 내용]\n{site_content}\n\n'
+            f'위 사이트가 "{rep_question}" 같은 질문에서 AI 인용 점유율이 낮은 원인 3가지를 분석하세요.\n'
+            f'사이트 내용을 직접 근거로 구체적 문제점을 지적하세요.{sim_ctx}\n'
+            f'각 항목은 완전한 문장으로. 번호 없이 한 줄씩 3개만:'
         )
+        r = ""  # BUG FIX: r 초기화
         with CaptureError("strategy_diag", log_level="warning"):
             r = (
-                call_gpt(client_gpt, prompt, system=_system, max_tokens=600,
+                call_gpt(client_gpt, prompt, system=_system, max_tokens=800,
                          model=model_gpt, temperature=0.4)
                 if client_gpt else
-                call_gemini(client_gemini, prompt, max_tokens=600, temperature=0.4)
+                call_gemini(client_gemini, prompt, max_tokens=800, temperature=0.4)
             )
-        items = [d.strip().lstrip("•-*") for d in r.split("\n") if d.strip()][:3]
-        return items or ["데이터 부족으로 분석 불가"]
+        items = [d.strip().lstrip("•-*0123456789. ") for d in r.split("\n") if d.strip() and len(d.strip()) > 10][:3]
+        return items or ["사이트 분석 데이터 부족으로 진단 불가"]
 
     def _keywords() -> list[str]:
         # biz.industry가 비어있거나 generic하면 brand_name + domain으로 보완
         industry_ctx = biz.industry if biz.industry and biz.industry not in ("기타 서비스", "서비스") else biz.brand_name
         prompt = (
-            f'다음 브랜드/서비스의 AI 인용 확률이 높은 블루오션 키워드 5개를 추천해주세요.\n'
-            f'\n'
+            f'아래는 {domain} ({biz.brand_name})의 실제 사이트 내용입니다.\n\n'
+            f'[사이트 내용]\n{site_content}\n\n'
+            f'위 사이트의 실제 서비스와 강점을 바탕으로,\n'
+            f'ChatGPT·Gemini·Perplexity가 자주 인용할 블루오션 키워드 5개를 추천하세요.\n\n'
             f'[분석 대상]\n'
-            f'- 브랜드: {biz.brand_name}\n'
-            f'- 도메인: {domain}\n'
-            f'- 업종/서비스: {industry_ctx}\n'
-            f'- 핵심 서비스: {biz.core_product}\n'
-            f'\n'
+            f'- 브랜드: {biz.brand_name} / 도메인: {domain}\n'
+            f'- 업종: {industry_ctx}\n\n'
             f'[조건]\n'
-            f'- ChatGPT, Gemini, Perplexity 등 AI 검색에서 {biz.brand_name}이 인용될 가능성이 높은 키워드\n'
-            f'- 경쟁이 적고 전문성 높은 틈새 키워드 (너무 일반적인 단어 제외)\n'
+            f'- 이 사이트의 실제 서비스·강점을 반영한 틈새 키워드\n'
+            f'- 경쟁이 적고 AI 인용 가능성 높은 키워드\n'
             f'- {scope_inst}\n'
-            f'- 반드시 한국어 키워드구 형태로만 (영어 금지)\n'
-            f'\n'
-            f'키워드만 한 줄에 하나씩 5개 출력 (번호, 설명 없이):'
+            f'- 반드시 한국어 키워드구 형태로만 (영어 금지)\n\n'
+            f'키워드만 한 줄에 하나씩 5개 출력 (번호·설명 없이):'
         )
         r = ""  # BUG FIX: r 초기화 — CaptureError 예외 억제 시 NameError 방지
         with CaptureError("strategy_kw", log_level="warning"):
