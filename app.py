@@ -632,9 +632,9 @@ with st.sidebar:
     gemini_key        = st.text_input("Gemini API Key",  type="password", placeholder="AIza...")
     gpt_model         = st.selectbox("GPT 모델",   ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"])
     _GEMINI_MODELS = [
-        "gemini-2.0-flash-001",
         "gemini-2.5-flash-preview-05-20",
         "gemini-1.5-flash-latest",
+        "gemini-1.5-pro-latest",
     ]
     gemini_model_name = st.selectbox("Gemini 모델", _GEMINI_MODELS, index=0)
 
