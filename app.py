@@ -24,7 +24,7 @@ try:
     from core.cache import get_cache
     from core.logger import get_logger, CaptureError
     from core.citation import build_brand_variants
-    from core.ai_client import run_all_simulations, CostTracker, SimResult
+    from core.ai_client import run_all_simulations, CostTracker, SimResult, fetch_competitor_brands
     from core.biz_analysis import run_strategy_analysis, BusinessInfo
 except ImportError as _e:
     st.set_page_config(page_title="Import Error", page_icon="❌")
@@ -479,12 +479,12 @@ def render_strategy(strategy: dict, target_url: str):
     <div style="font-size:1rem;font-weight:800;color:{_text};margin:0 0 12px">
         🏆 AI 인용 경쟁 현황
         <span style="font-size:.72rem;font-weight:600;color:{_text_muted};margin-left:8px">
-            {"실측 기반" if measured else "AI 추정 ⚠️"}
+            {"AI 인용 분석 기반" if measured else "AI 추정 ⚠️"}
         </span>
     </div>""", unsafe_allow_html=True)
 
     if not measured and competitors_ai:
-        st.caption("⚠️ 시뮬레이션 응답에서 브랜드가 추출되지 않아 AI 추정값을 표시합니다.")
+        st.caption("⚠️ 경쟁사 조회 실패 — AI 추정값을 표시합니다.")
 
     pos_colors = {
         "업계1위":"#22C55E","업계 1위":"#22C55E",
@@ -495,25 +495,36 @@ def render_strategy(strategy: dict, target_url: str):
     if measured:
         items = sorted(measured.items(), key=lambda x: x[1].get("mentions", 0), reverse=True)[:5]
         for rank, (brand, data) in enumerate(items, 1):
-            mentions  = data.get("mentions", 0)
-            urls      = data.get("urls", [])
-            dom       = urls[0].replace("https://","").replace("http://","").split("/")[0] if urls else ""
-            is_mine   = target_domain.lower() in brand.lower()
+            score    = data.get("mentions", 0)   # fetch_competitor_brands의 mention_score
+            dom      = data.get("domain", "")
+            reason   = data.get("reason", "")
+            is_mine  = target_domain.lower() in brand.lower() or target_domain.lower() in dom.lower()
             row_style = f"background:rgba(255,107,53,.08);border:1.5px solid {_accent}" if is_mine else f"background:{_bg2};border:1.5px solid {_border}"
-            fw        = "700" if is_mine else "500"
+            fw       = "700" if is_mine else "500"
             mine_badge = f'<span style="margin-left:6px;font-size:.68rem;font-weight:700;color:white;background:{_accent};padding:1px 7px;border-radius:20px">내 사이트</span>' if is_mine else ""
-            dom_div   = f'<div style="font-size:.73rem;color:{_text_muted};margin-top:1px">{dom}</div>' if dom else ""
+            dom_div  = f'<div style="font-size:.72rem;color:{_text_muted};margin-top:1px">{dom}</div>' if dom else ""
+            reason_div = f'<div style="font-size:.72rem;color:{_text_muted};margin-top:2px">{reason}</div>' if reason else ""
+            # score: 100점 만점 상대적 인용 가능성 점수
+            score_bar_w = max(8, int(score * 0.6))  # 최대 60px
+            score_label = f"{score}점" if score <= 100 else f"{score}회"
             st.markdown(
                 f'<div style="display:flex;align-items:center;justify-content:space-between;'
-                f'padding:10px 16px;border-radius:10px;margin:5px 0;{row_style}">'
+                f'padding:12px 16px;border-radius:12px;margin:6px 0;{row_style}">'
                 f'<div style="display:flex;align-items:center;gap:12px">'
-                f'<div style="width:26px;height:26px;border-radius:8px;display:flex;align-items:center;'
-                f'justify-content:center;font-size:.78rem;font-weight:800;color:white;'
-                f'background:{_accent_gr}">{rank}</div>'
-                f'<div><span style="font-weight:{fw};font-size:.9rem;color:{_text}">{brand}</span>'
-                f'{mine_badge}{dom_div}</div></div>'
-                f'<span style="background:#1D4ED8;color:white;padding:2px 10px;border-radius:20px;'
-                f'font-size:.75rem;font-weight:700">{mentions}회 언급</span></div>',
+                f'<div style="width:28px;height:28px;border-radius:8px;display:flex;align-items:center;'
+                f'justify-content:center;font-size:.8rem;font-weight:800;color:white;'
+                f'background:{_accent_gr};flex-shrink:0">{rank}</div>'
+                f'<div>'
+                f'<div style="display:flex;align-items:center;gap:6px">'
+                f'<span style="font-weight:{fw};font-size:.92rem;color:{_text}">{brand}</span>'
+                f'{mine_badge}</div>'
+                f'{dom_div}{reason_div}'
+                f'</div></div>'
+                f'<div style="text-align:right;flex-shrink:0">'
+                f'<div style="background:linear-gradient(90deg,{_accent},{_accent2});'
+                f'height:6px;border-radius:4px;width:{score_bar_w}px;margin-bottom:4px;margin-left:auto"></div>'
+                f'<span style="font-size:.72rem;font-weight:700;color:{_accent}">{score_label}</span>'
+                f'</div></div>',
                 unsafe_allow_html=True,
             )
     else:
@@ -861,18 +872,18 @@ with tab_main:
             prog.progress(0.7)
             stat.markdown("🧠 **전략 분석 생성 중...**")
 
-            # competitor_mentions 집계
-            merged_mentions: dict = {}
-            for _r in all_results:
-                _cm = (_r.competitor_mentions if hasattr(_r, "competitor_mentions")
-                       else (_r.get("competitor_mentions") if isinstance(_r, dict) else {}))
-                for _brand, _data in (_cm or {}).items():
-                    if _brand not in merged_mentions:
-                        merged_mentions[_brand] = {"mentions": 0, "urls": []}
-                    merged_mentions[_brand]["mentions"] += _data.get("mentions", 0)
-                    merged_mentions[_brand]["urls"] = list(set(
-                        merged_mentions[_brand]["urls"] + _data.get("urls", [])
-                    ))
+            # Option B: 전용 경쟁사 브랜드 조회 (1회 호출)
+            with CaptureError("competitor_brands", log_level="warning"):
+                competitor_brands = fetch_competitor_brands(
+                    client_gpt, client_gemini,
+                    questions=questions_input,
+                    target_url=target_url,
+                    brand_name=brand_name,
+                    model_gpt=gpt_model,
+                    market_scope=market_scope,
+                    tracker=tracker,
+                    use_cache=True,
+                )
 
             with CaptureError("strategy", log_level="warning") as s_ctx:
                 strategy = run_strategy_analysis(
@@ -884,8 +895,9 @@ with tab_main:
                     use_cache=True,
                 )
 
-            if strategy and merged_mentions:
-                strategy["measured_competitors"] = merged_mentions
+            # 전용 조회 결과를 경쟁 현황에 주입
+            if strategy and competitor_brands:
+                strategy["measured_competitors"] = competitor_brands
 
             prog.progress(1.0)
 
