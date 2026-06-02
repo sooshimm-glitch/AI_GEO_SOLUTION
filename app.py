@@ -631,7 +631,7 @@ with st.sidebar:
     openai_key        = st.text_input("OpenAI API Key",  type="password", placeholder="sk-...")
     gemini_key        = st.text_input("Gemini API Key",  type="password", placeholder="AIza...")
     gpt_model         = st.selectbox("GPT 모델",   ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"])
-    gemini_model_name = st.selectbox("Gemini 모델", ["models/gemini-2.0-flash", "models/gemini-flash-latest"])
+    gemini_model_name = st.selectbox("Gemini 모델", ["gemini-2.0-flash", "gemini-2.5-flash-preview-05-20", "gemini-1.5-flash"])
 
     st.markdown("---")
 
@@ -854,6 +854,20 @@ with tab_main:
             save_cache()
             st.session_state["cost_tracker"] = tracker
             stat.success(f"시뮬레이션 완료 ({elapsed_sim}초) | ~${tracker.summary()['estimated_usd']:.4f}")
+
+            # ── Gemini 디버그 (0% 원인 파악용) ──
+            with st.expander("🔍 Gemini 디버그 (0% 원인 파악)", expanded=True):
+                for i, _r in enumerate(all_results):
+                    _rd = _r.to_dict() if hasattr(_r, "to_dict") else _r
+                    gem_rate = _rd.get("gemini_rate")
+                    gem_hits = _rd.get("gemini_hits")
+                    gem_samp = _rd.get("gemini_samples", [])
+                    st.markdown(f"**Q{i+1}** gemini_rate={gem_rate} hits={gem_hits}")
+                    if gem_samp:
+                        for s in gem_samp[:2]:
+                            st.code(s[:300], language=None)
+                    else:
+                        st.warning("gemini_samples 없음 → 응답이 빈 문자열이거나 hit이 없음")
 
             # 워크플로우 카드
             n_engines = (1 if client_gpt else 0) + (1 if client_gemini else 0)
