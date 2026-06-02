@@ -141,39 +141,50 @@ def _make_search_tool(genai):
 def call_gemini(model_obj, prompt, max_tokens=300, temperature=0.7,
                 tracker=None, use_search=False):
     """
-    신 SDK(google.genai) 사용.
+    신 SDK(google.genai) 사용. 503 시 최대 3회 재시도.
     model_obj: (api_key, model_name) 튜플로 전달받음.
     """
-    try:
-        import google.genai as genai
-        from google.genai import types as gtypes
+    import time
+    import google.genai as genai
+    from google.genai import types as gtypes
 
-        api_key, model_name = model_obj  # 신 SDK: 튜플로 전달
+    api_key, model_name = model_obj
+    client = genai.Client(api_key=api_key)
+    cfg = gtypes.GenerateContentConfig(
+        max_output_tokens=max_tokens,
+        temperature=temperature,
+    )
 
-        client = genai.Client(api_key=api_key)
-        cfg = gtypes.GenerateContentConfig(
-            max_output_tokens=max_tokens,
-            temperature=temperature,
-        )
-        # model_name이 "models/xxx" 형식이면 그대로, 아니면 그대로
-        response = client.models.generate_content(
-            model=model_name,
-            contents=prompt,
-            config=cfg,
-        )
-        text = (response.text or "").strip()
-
-        if tracker and response.usage_metadata:
-            um = response.usage_metadata
-            tracker.add_gemini(
-                getattr(um, "prompt_token_count", 0),
-                getattr(um, "candidates_token_count", 0),
+    last_err = None
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=cfg,
             )
-        return text
+            text = (response.text or "").strip()
+            if tracker and response.usage_metadata:
+                um = response.usage_metadata
+                tracker.add_gemini(
+                    getattr(um, "prompt_token_count", 0),
+                    getattr(um, "candidates_token_count", 0),
+                )
+            return text
+        except Exception as e:
+            last_err = e
+            err_str = str(e)
+            if "503" in err_str or "UNAVAILABLE" in err_str:
+                wait = 2 ** attempt  # 1초, 2초, 4초
+                logger.warning(f"Gemini 503 재시도 {attempt+1}/3 ({wait}초 대기)")
+                time.sleep(wait)
+                continue
+            # 503 외 에러는 즉시 실패
+            logger.warning(f"Gemini call failed: {e}")
+            return ""
 
-    except Exception as e:
-        logger.warning(f"Gemini call failed: {e}")
-        return ""
+    logger.warning(f"Gemini 3회 재시도 실패: {last_err}")
+    return ""
 
 
 # ─────────────────────────────────────────────
