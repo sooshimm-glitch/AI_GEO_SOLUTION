@@ -724,8 +724,27 @@ with st.expander("🧪 Gemini 연결 테스트 (디버그용)", expanded=False):
                     import google.genai as genai
                     from google.genai import types as gtypes
                     _api_key, _model_name = client_gemini
-                    st.write(f"모델명: `{_model_name}`")
                     _client = genai.Client(api_key=_api_key)
+
+                    # 사용 가능한 모델 목록 조회
+                    st.markdown("**사용 가능한 모델 목록:**")
+                    try:
+                        _all_models = list(_client.models.list())
+                        _gem_models = [
+                            m.name for m in _all_models
+                            if "gemini" in (m.name or "").lower()
+                            and hasattr(m, "supported_actions")
+                            and "generateContent" in (m.supported_actions or [])
+                        ]
+                        if not _gem_models:
+                            _gem_models = [m.name for m in _all_models if "gemini" in (m.name or "").lower()]
+                        for _mn in _gem_models[:10]:
+                            st.code(_mn)
+                    except Exception as _le:
+                        st.warning(f"모델 목록 조회 실패: {_le}")
+
+                    # 현재 선택 모델로 테스트
+                    st.write(f"선택 모델: `{_model_name}`")
                     _test_resp = _client.models.generate_content(
                         model=_model_name,
                         contents=test_q,
