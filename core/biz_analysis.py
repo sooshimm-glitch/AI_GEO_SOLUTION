@@ -397,43 +397,38 @@ JSON 배열만 출력 (다른 텍스트 없이):
             f'사이트 내용을 직접 근거로 구체적 문제점을 지적하세요.{sim_ctx}\n'
             f'각 항목은 완전한 문장으로. 번호 없이 한 줄씩 3개만:'
         )
-        r = ""  # BUG FIX: r 초기화
-        with CaptureError("strategy_diag", log_level="warning"):
-            r = (
-                call_gpt(client_gpt, prompt, system=_system, max_tokens=800,
-                         model=model_gpt, temperature=0.4)
-                if client_gpt else
-                call_gemini(client_gemini, prompt, max_tokens=800, temperature=0.4)
-            )
+        r = ""
+        if client_gpt:
+            with CaptureError("strategy_diag_gpt", log_level="info"):
+                r = call_gpt(client_gpt, prompt, system=_system, max_tokens=800,
+                             model=model_gpt, temperature=0.4)
+        if not r and client_gemini:
+            with CaptureError("strategy_diag_gemini", log_level="warning"):
+                r = call_gemini(client_gemini, prompt, max_tokens=800, temperature=0.4)
         items = [d.strip().lstrip("•-*0123456789. ") for d in r.split("\n") if d.strip() and len(d.strip()) > 10][:3]
         return items or ["사이트 분석 데이터 부족으로 진단 불가"]
 
     def _keywords() -> list[str]:
-        # biz.industry가 비어있거나 generic하면 brand_name + domain으로 보완
         industry_ctx = biz.industry if biz.industry and biz.industry not in ("기타 서비스", "서비스") else biz.brand_name
+        # site_content가 너무 길면 Gemini가 빈 응답 반환 → 500자로 제한
+        site_snippet = site_content[:500] if site_content else "(사이트 정보 없음)"
         prompt = (
-            f'아래는 {domain} ({biz.brand_name})의 실제 사이트 내용입니다.\n\n'
-            f'[사이트 내용]\n{site_content}\n\n'
-            f'위 사이트의 실제 서비스와 강점을 바탕으로,\n'
-            f'ChatGPT·Gemini·Perplexity가 자주 인용할 블루오션 키워드 5개를 추천하세요.\n\n'
-            f'[분석 대상]\n'
-            f'- 브랜드: {biz.brand_name} / 도메인: {domain}\n'
-            f'- 업종: {industry_ctx}\n\n'
-            f'[조건]\n'
-            f'- 이 사이트의 실제 서비스·강점을 반영한 틈새 키워드\n'
-            f'- 경쟁이 적고 AI 인용 가능성 높은 키워드\n'
-            f'- {scope_inst}\n'
-            f'- 반드시 한국어 키워드구 형태로만 (영어 금지)\n\n'
-            f'키워드만 한 줄에 하나씩 5개 출력 (번호·설명 없이):'
+            f'{biz.brand_name}({domain}) 사이트의 AI 인용 가능성 높은 블루오션 키워드 5개.\n\n'
+            f'[사이트 핵심 내용]\n{site_snippet}\n\n'
+            f'[업종] {industry_ctx}\n\n'
+            f'조건: {scope_inst} / 한국어 키워드구만 / 틈새·전문 키워드\n\n'
+            f'키워드만 한 줄에 하나씩 5개 출력:'
         )
-        r = ""  # BUG FIX: r 초기화 — CaptureError 예외 억제 시 NameError 방지
-        with CaptureError("strategy_kw", log_level="warning"):
-            r = (
-                call_gemini(client_gemini, prompt, max_tokens=600, temperature=0.7)
-                if client_gemini else
-                call_gpt(client_gpt, prompt, system=_system, max_tokens=600,
-                         model=model_gpt, temperature=0.7)
-            )
+        r = ""
+        # 1차: Gemini 시도
+        if client_gemini:
+            with CaptureError("strategy_kw_gemini", log_level="info"):
+                r = call_gemini(client_gemini, prompt, max_tokens=400, temperature=0.7)
+        # 2차: Gemini 실패(빈 응답 포함) 시 GPT 폴백
+        if not r and client_gpt:
+            with CaptureError("strategy_kw_gpt", log_level="warning"):
+                r = call_gpt(client_gpt, prompt, system=_system, max_tokens=400,
+                             model=model_gpt, temperature=0.7)
         items = [
             k.strip().lstrip("•-*1234567890. ")
             for k in r.split("\n")
