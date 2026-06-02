@@ -803,9 +803,13 @@ with tab_main:
             brand_name = brand_input.strip()
 
             biz_info = BusinessInfo(
-                brand_name=brand_name, industry="", industry_category="기타",
-                core_product="", target_audience="잠재 고객",
-                confidence="high", crawl_tier=0,
+                brand_name=brand_name,
+                industry="",           # run_strategy_analysis 내부에서 크롤 후 채워짐
+                industry_category="기타",
+                core_product=f"{brand_name} 서비스",
+                target_audience="잠재 고객",
+                confidence="high",
+                crawl_tier=0,
             )
 
             # 실행 상태 배너
