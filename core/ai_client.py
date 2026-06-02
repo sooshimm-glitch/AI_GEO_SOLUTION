@@ -328,42 +328,43 @@ def _merge_mentions(a, b):
 
 def _adaptive_batch(call_fn, question, brand_variants, n,
                     early_stop_threshold=0.05, count_mention=False):
+    """
+    n회 API 호출을 ThreadPoolExecutor로 완전 병렬 실행.
+    응답 1개당 hit은 bool(0 or 1) → 브랜드명+도메인 동시 등장해도 중복 카운트 없음.
+    """
+    first_pat = re.compile(re.escape(brand_variants[0]), re.IGNORECASE) if brand_variants else re.compile("NOMATCH")
+
+    def _one_call(_):
+        resp = ""
+        with CaptureError("batch_call", log_level="debug"):
+            resp = call_fn(question)
+        return resp
+
+    max_workers = min(n, 10)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futs = [ex.submit(_one_call, i) for i in range(n)]
+        responses = []
+        for fut in concurrent.futures.as_completed(futs):
+            try:
+                responses.append(fut.result(timeout=30))
+            except Exception:
+                responses.append("")
+
+    hits = 0
     samples = []
-    probe_n = min(10, n)
-    probe_hits = 0
     all_mentions = {}
 
-    for _ in range(probe_n):
-        resp = ""
-        with CaptureError("probe", log_level="debug"):
-            resp = call_fn(question)
+    for resp in responses:
         if not resp:
             continue
         result = detect_citation(resp, brand_variants)
-        hit = result.cited or (count_mention and _check_mention(resp, brand_variants)) or (count_mention and bool(re.search(re.escape(brand_variants[0]) if brand_variants else 'NOMATCH', resp, re.IGNORECASE)))
-        if hit:
-            probe_hits += 1
-        if len(samples) < 3 and (result.response_sample or hit):
-            samples.append(result.response_sample or resp[:200])
-        all_mentions = _merge_mentions(all_mentions, _extract_mentions(resp))
-
-    probe_rate = probe_hits / probe_n if probe_n > 0 else 0
-    lo, hi = wilson_ci(probe_hits, probe_n)
-    if (hi < early_stop_threshold * 100) or (lo > (1 - early_stop_threshold) * 100):
-        logger.info(f"조기 종료: rate={probe_rate:.1%}")
-        return probe_hits + round(probe_rate * (n - probe_n)), samples, n, all_mentions
-
-    hits = probe_hits
-    for _ in range(n - probe_n):
-        resp = ""
-        with CaptureError("full", log_level="debug"):
-            resp = call_fn(question)
-        if not resp:
-            continue
-        result = detect_citation(resp, brand_variants)
-        hit = result.cited or (count_mention and _check_mention(resp, brand_variants)) or (count_mention and bool(re.search(re.escape(brand_variants[0]) if brand_variants else 'NOMATCH', resp, re.IGNORECASE)))
-        if hit:
-            hits += 1
+        # 응답 1개당 hit은 bool → 브랜드명+도메인 동시 등장해도 +1만
+        hit = bool(
+            result.cited
+            or (count_mention and _check_mention(resp, brand_variants))
+            or (count_mention and first_pat.search(resp))
+        )
+        hits += hit
         if len(samples) < 3 and (result.response_sample or hit):
             samples.append(result.response_sample or resp[:200])
         all_mentions = _merge_mentions(all_mentions, _extract_mentions(resp))
@@ -481,4 +482,134 @@ def run_all_simulations(client_gpt, client_gemini, questions, target_url,
             with CaptureError("collect", log_level="warning"):
                 fut.result(timeout=collect_timeout)
 
+
     return [r if r is not None else _empty() for r in results]
+
+
+# ─────────────────────────────────────────────
+# Option B: 전용 경쟁사 브랜드 조회 (1회 호출)
+# ─────────────────────────────────────────────
+
+def fetch_competitor_brands(
+    client_gpt,
+    client_gemini,
+    questions: list,
+    target_url: str,
+    brand_name: str,
+    model_gpt: str = "gpt-4o-mini",
+    market_scope: str = "국내 (대한민국)",
+    tracker=None,
+    use_cache: bool = True,
+) -> dict:
+    """
+    시뮬레이션 응답과 무관하게,
+    '이 질문들에서 AI가 자주 인용하는 경쟁 브랜드'를 전용 프롬프트로 1회 조회.
+
+    반환: {brand_name: {mentions: int, domain: str, reason: str}, ...}
+    """
+    from urllib.parse import urlparse
+    try:
+        p = urlparse(target_url if target_url.startswith("http") else "https://" + target_url)
+        domain = p.netloc.replace("www.", "")
+    except Exception:
+        domain = target_url
+
+    cache = get_cache()
+    cache_key = cache.make_key(
+        "competitor_brands", domain, brand_name,
+        "|".join(questions[:3]), market_scope, model_gpt
+    )
+    if use_cache:
+        cached = cache.get(cache_key)
+        if cached is not None:
+            logger.info(f"Cache HIT: competitor_brands({domain})")
+            return cached
+
+    scope_inst = (
+        "반드시 대한민국에서 실제 서비스 중인 국내 브랜드만"
+        if "국내" in market_scope
+        else "국내외 글로벌 브랜드 포함"
+    )
+
+    q_text = "\n".join(f"- {q}" for q in questions[:5])
+
+    prompt = f"""아래 질문들에 AI(ChatGPT, Gemini, Perplexity 등)가 답변할 때
+실제로 자주 인용하거나 추천하는 경쟁 브랜드/서비스를 조사해주세요.
+
+[분석 대상 브랜드]
+- 브랜드명: {brand_name}
+- 도메인: {domain}
+
+[사용자 질문 목록]
+{q_text}
+
+[조건]
+- {scope_inst}
+- 실제 존재하는 브랜드와 공식 도메인만 포함 (가상 도메인 절대 금지)
+- {brand_name} / {domain} 자체는 제외
+- AI 검색에서 실제로 자주 등장하는 브랜드 우선
+
+상위 8개를 아래 JSON 형식으로만 출력 (다른 텍스트 없이):
+[
+  {{
+    "rank": 1,
+    "brand_name": "실제브랜드명",
+    "domain": "실제도메인.com",
+    "reason": "인용 이유 15자 이내",
+    "mention_score": 85
+  }}
+]"""
+
+    raw = ""
+    with CaptureError("competitor_brands_call", log_level="warning"):
+        if client_gpt:
+            raw = call_gpt(
+                client_gpt, prompt,
+                system="당신은 AI 검색 마케팅 분석 전문가입니다.",
+                max_tokens=1000, model=model_gpt, temperature=0.2,
+                tracker=tracker,
+            )
+        elif client_gemini:
+            raw = call_gemini(
+                client_gemini, prompt,
+                max_tokens=1000, temperature=0.2,
+                tracker=tracker,
+            )
+
+    result = {}
+    if raw:
+        import json, re as _re
+        with CaptureError("competitor_brands_parse", log_level="warning"):
+            m = _re.search(r'\[.*\]', raw, _re.DOTALL)
+            if m:
+                parsed = json.loads(m.group())
+                for item in parsed:
+                    bname  = str(item.get("brand_name", "")).strip()
+                    bdom   = str(item.get("domain", "")).strip().lower()
+                    reason = str(item.get("reason", "")).strip()
+                    score  = int(item.get("mention_score", 50))
+
+                    # 가짜 도메인 필터
+                    if not bname or not bdom:
+                        continue
+                    if _re.match(r'^(example|test|dummy|fake|competitor)\d*\.', bdom):
+                        continue
+                    if not _re.search(r'\.[a-z]{2,6}$', bdom):
+                        continue
+                    # 분석 대상 자신 제외
+                    if domain.lower() in bdom or brand_name.lower() in bname.lower():
+                        continue
+
+                    result[bname] = {
+                        "mentions": score,
+                        "domain":   bdom,
+                        "reason":   reason,
+                        "urls":     [f"https://{bdom}"],
+                    }
+
+    logger.info(f"competitor_brands: {len(result)}개 확보 ({domain})")
+
+    if use_cache and result:
+        cache.set(cache_key, result, namespace="competitors")
+
+    return result
