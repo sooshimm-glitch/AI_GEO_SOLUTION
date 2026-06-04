@@ -362,6 +362,7 @@ def _adaptive_batch(call_fn, question, brand_variants, n,
     응답 1개당 hit은 bool(0 or 1) → 브랜드명+도메인 동시 등장해도 중복 카운트 없음.
     """
     first_pat = re.compile(re.escape(brand_variants[0]), re.IGNORECASE) if brand_variants else re.compile("NOMATCH")
+    logger.warning(f"[BATCH] 시작: n={n}, count_mention={count_mention}, variants={brand_variants[:3]}")
 
     def _one_call(_):
         resp = ""
@@ -430,7 +431,9 @@ def run_simulation(client_gpt, client_gemini, question, target_url, model_gpt,
                                    n, ",".join(sorted(brand_variants)))
         cached = cache.get(cache_key)
         if cached is not None:
+            logger.warning(f"[SIM] 캐시 HIT — gemini_rate={cached.get('gemini_rate')}, gpt_rate={cached.get('gpt_rate')}")
             return SimResult(cache_hit=True, **cached)
+        logger.warning(f"[SIM] 캐시 MISS — 새로 실행")
     else:
         cache_key = None
 
