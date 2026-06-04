@@ -42,7 +42,6 @@ st.set_page_config(
 
 # ── Session state 초기화 ──────────────────────────────────────────────────────
 for k, v in {
-    "dark_mode": False,
     "cache_data": {},
     "cost_tracker": CostTracker(),
     "history": [],
@@ -61,45 +60,24 @@ if st.session_state["cache_data"]:
     except Exception:
         st.session_state["cache_data"] = {}
 
-_dark = st.session_state["dark_mode"]
-
 # ── 색상 테마 (오렌지/핑크 계열) ─────────────────────────────────────────────
-if _dark:
-    _bg       = "#0D0D0D"
-    _bg2      = "#181818"
-    _card     = "#1C1C1C"
-    _border   = "#2E2E2E"
-    _text     = "#F2F2F2"
-    _text_muted = "#888888"
-    _shadow   = "0 4px 20px rgba(0,0,0,.6)"
-    _sidebar_bg = "#FFFFFF"
-    _accent   = "#FF6B35"   # 오렌지
-    _accent2  = "#FF4D8B"   # 핑크
-    _accent_gr = "linear-gradient(135deg,#FF6B35,#FF4D8B)"
-    _running_bg = "rgba(255,107,53,.15)"
-    _running_border = "#FF6B35"
-    _plot_bg  = "#1C1C1C"
-    _plot_paper = "#1C1C1C"
-    _plot_font = "#F2F2F2"
-    _plot_grid = "#2E2E2E"
-else:
-    _bg       = "#FFF8F5"
-    _bg2      = "#FFF0E8"
-    _card     = "#FFFFFF"
-    _border   = "#FFD9C7"
-    _text     = "#1A1A1A"
-    _text_muted = "#888888"
-    _shadow   = "0 4px 20px rgba(255,107,53,.1)"
-    _sidebar_bg = "#FFFFFF"
-    _accent   = "#FF6B35"
-    _accent2  = "#FF4D8B"
-    _accent_gr = "linear-gradient(135deg,#FF6B35,#FF4D8B)"
-    _running_bg = "rgba(255,107,53,.08)"
-    _running_border = "#FF6B35"
-    _plot_bg  = "#FFFFFF"
-    _plot_paper = "#FFFFFF"
-    _plot_font = "#1A1A1A"
-    _plot_grid = "#FFE8DC"
+_bg         = "#FFF8F5"
+_bg2        = "#FFF0E8"
+_card       = "#FFFFFF"
+_border     = "#FFD9C7"
+_text       = "#1A1A1A"
+_text_muted = "#888888"
+_shadow     = "0 4px 20px rgba(255,107,53,.1)"
+_sidebar_bg = "#FFFFFF"
+_accent     = "#FF6B35"
+_accent2    = "#FF4D8B"
+_accent_gr  = "linear-gradient(135deg,#FF6B35,#FF4D8B)"
+_running_bg = "rgba(255,107,53,.08)"
+_running_border = "#FF6B35"
+_plot_bg    = "#FFFFFF"
+_plot_paper = "#FFFFFF"
+_plot_font  = "#1A1A1A"
+_plot_grid  = "#FFE8DC"
 
 # ── 전역 CSS ──────────────────────────────────────────────────────────────────
 st.markdown(f"""
@@ -404,7 +382,7 @@ def render_donut_tabs(results: list, questions: list, brand_name: str):
                     labels=[f"{label} 인용", "미인용"],
                     hole=0.72,
                     marker=dict(
-                        colors=[color, "#E5E7EB" if not _dark else "#2A2A2A"],
+                        colors=[color, "#E5E7EB"],
                         line=dict(width=0),
                     ),
                     textinfo="none",
@@ -621,10 +599,6 @@ with st.sidebar:
         <div style="background:{_accent_gr};color:white;font-size:.65rem;font-weight:700;
             padding:2px 10px;border-radius:20px;display:inline-block;margin-top:4px">v4.0</div>
     </div>""", unsafe_allow_html=True)
-
-    if st.button("🌙 다크 모드" if not _dark else "☀️ 라이트 모드", key="btn_dark", use_container_width=True):
-        st.session_state["dark_mode"] = not _dark
-        st.rerun()
 
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
