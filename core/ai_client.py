@@ -172,6 +172,7 @@ def call_gemini(model_obj, prompt, max_tokens=300, temperature=0.7,
                 config=cfg,
             )
             text = (response.text or "").strip()
+            logger.warning(f"[GEM] 응답 수신: len={len(text)}, preview='{text[:80].replace(chr(10),' ')}'")
             if tracker and response.usage_metadata:
                 um = response.usage_metadata
                 tracker.add_gemini(
