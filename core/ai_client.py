@@ -148,7 +148,15 @@ def call_gemini(model_obj, prompt, max_tokens=300, temperature=0.7,
     import google.genai as genai
     from google.genai import types as gtypes
 
+    # model_obj 타입 검증
+    if not isinstance(model_obj, tuple) or len(model_obj) != 2:
+        logger.warning(f"[GEM] model_obj 타입 오류: {type(model_obj)} — 튜플(api_key, model_name) 필요")
+        return ""
     api_key, model_name = model_obj
+    if not api_key or not model_name:
+        logger.warning(f"[GEM] api_key 또는 model_name 비어있음")
+        return ""
+    logger.warning(f"[GEM] 호출 시작: model={model_name}, prompt_len={len(prompt)}")
     client = genai.Client(api_key=api_key)
     cfg = gtypes.GenerateContentConfig(
         max_output_tokens=max_tokens,
