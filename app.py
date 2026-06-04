@@ -732,8 +732,8 @@ with st.expander("🧪 Gemini 연결 테스트 (디버그용)", expanded=False):
                         st.code(_text[:500])
                         # 브랜드 매칭 테스트
                         from core.citation import build_brand_variants, detect_citation
-                        _url = url_input.strip() if 'url_input' in st.session_state else ""
-                        _brand = brand_input.strip() if 'brand_input' in st.session_state else ""
+                        _url = st.session_state.get("url_input", "")
+                        _brand = st.session_state.get("brand_input", "")
                         if _url and _brand:
                             _variants = build_brand_variants(
                                 ("https://"+_url if not _url.startswith("http") else _url),
