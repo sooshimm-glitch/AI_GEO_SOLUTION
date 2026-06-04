@@ -156,7 +156,6 @@ def call_gemini(model_obj, prompt, max_tokens=300, temperature=0.7,
     if not api_key or not model_name:
         logger.warning(f"[GEM] api_key 또는 model_name 비어있음")
         return ""
-    logger.warning(f"[GEM] 호출: model={model_name}, prompt_len={len(prompt)}")
     client = genai.Client(api_key=api_key)
     # gemini-2.5 thinking 모델: thinking 비활성화로 MAX_TOKENS 방지
     _thinking = None
@@ -192,12 +191,6 @@ def call_gemini(model_obj, prompt, max_tokens=300, temperature=0.7,
                     text = text.strip()
                 except Exception:
                     pass
-            # finish_reason 로깅
-            try:
-                finish = response.candidates[0].finish_reason
-                logger.warning(f"[GEM] 응답: len={len(text)}, finish={finish}")
-            except Exception:
-                logger.warning(f"[GEM] 응답: len={len(text)}")
             if tracker and response.usage_metadata:
                 um = response.usage_metadata
                 tracker.add_gemini(
@@ -369,7 +362,6 @@ def _adaptive_batch(call_fn, question, brand_variants, n,
     응답 1개당 hit은 bool(0 or 1) → 브랜드명+도메인 동시 등장해도 중복 카운트 없음.
     """
     first_pat = re.compile(re.escape(brand_variants[0]), re.IGNORECASE) if brand_variants else re.compile("NOMATCH")
-    logger.warning(f"[BATCH] 시작: n={n}, count_mention={count_mention}, variants={brand_variants[:3]}")
 
     def _one_call(_):
         resp = ""
@@ -402,15 +394,6 @@ def _adaptive_batch(call_fn, question, brand_variants, n,
         hit = bool(result.cited or check_hit or pat_hit)
         hits += hit
 
-        # 디버깅: 첫 응답 무조건 WARNING으로 출력 (브랜드 매칭 실패 원인 파악)
-        if count_mention and hits == 0 and empty_count == 0:
-            _resp_preview = resp[:150].replace('\n', ' ')
-            logger.warning(
-                f"[GEM_DEBUG] cited={result.cited}(conf={result.confidence:.2f}) "
-                f"check={check_hit} pat={pat_hit} "
-                f"variants={brand_variants[:3]} "
-                f"resp='{_resp_preview}'"
-            )
 
         if len(samples) < 3 and (result.response_sample or hit):
             samples.append(result.response_sample or resp[:200])
@@ -438,9 +421,7 @@ def run_simulation(client_gpt, client_gemini, question, target_url, model_gpt,
                                    n, ",".join(sorted(brand_variants)))
         cached = cache.get(cache_key)
         if cached is not None:
-            logger.warning(f"[SIM] 캐시 HIT — gemini_rate={cached.get('gemini_rate')}, gpt_rate={cached.get('gpt_rate')}")
             return SimResult(cache_hit=True, **cached)
-        logger.warning(f"[SIM] 캐시 MISS — 새로 실행")
     else:
         cache_key = None
 
