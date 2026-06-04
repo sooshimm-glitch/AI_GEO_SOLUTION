@@ -127,15 +127,9 @@ def build_brand_variants(target_url: str, biz_info: dict) -> list[str]:
         if len(no_space) >= 2:
             variants.add(no_space.lower())
 
-        # [추가] 한글 브랜드명 공백 삽입 변형
-        # "에이바헤어" → "에이바 헤어", "에이 바헤어"
-        if re.search(r'[가-힣]', brand_name) and len(brand_name) >= 4:
-            mid = len(brand_name) // 2
-            for split_at in [mid - 1, mid, mid + 1]:
-                if 2 <= split_at <= len(brand_name) - 2:
-                    spaced = brand_name[:split_at] + " " + brand_name[split_at:]
-                    if len(spaced) >= 3:
-                        variants.add(spaced)
+        # 한글 공백 삽입 변형 제거 — 오히려 매칭 오탐 발생
+        # "프로그레스미디어" → "프로그 레스미디어"가 variants에 들어가
+        # 실제 응답의 "프로그레스미디어"와 매칭 실패하는 문제
 
     # ── 4. EN↔KO 매핑 ──
     # 스템 및 하이픈 파트 기반
