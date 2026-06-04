@@ -1,5 +1,5 @@
 """
-AI Citation Analyzer v4.0 — 리디자인
+AI Citation Analyzer v4.1 — 리디자인
 색상: 오렌지/핑크 계열 (참고 이미지 기반)
 차트: 질문별 탭 + 도넛 차트 (GPT/Gemini 각각)
 """
@@ -423,7 +423,7 @@ def render_donut_tabs(results: list, questions: list, brand_name: str):
                 </div>""", unsafe_allow_html=True)
                 if gpt_rate is not None:
                     fig, ci_text = _make_donut(gpt_rate, gpt_hits or 0, n_sim, "GPT", _accent, gpt_ci)
-                    st.plotly_chart(fig, use_container_width=True,
+                    st.plotly_chart(fig, width='stretch',
                                     key=f"donut_gpt_{_donut_counter['n']}_{i}")
                     if ci_text:
                         st.caption(f"95% 신뢰구간: {ci_text}")
@@ -438,7 +438,7 @@ def render_donut_tabs(results: list, questions: list, brand_name: str):
                 </div>""", unsafe_allow_html=True)
                 if gem_rate is not None:
                     fig, ci_text = _make_donut(gem_rate, gem_hits or 0, n_sim, "Gemini", _accent2, gem_ci)
-                    st.plotly_chart(fig, use_container_width=True,
+                    st.plotly_chart(fig, width='stretch',
                                     key=f"donut_gem_{_donut_counter['n']}_{i}")
                     if ci_text:
                         st.caption(f"95% 신뢰구간: {ci_text}")
@@ -597,7 +597,7 @@ with st.sidebar:
         <div style="font-size:2rem;margin-bottom:6px">🔍</div>
         <div style="color:{_text};font-size:1rem;font-weight:800">AI Citation Analyzer</div>
         <div style="background:{_accent_gr};color:white;font-size:.65rem;font-weight:700;
-            padding:2px 10px;border-radius:20px;display:inline-block;margin-top:4px">v4.0</div>
+            padding:2px 10px;border-radius:20px;display:inline-block;margin-top:4px">v4.1</div>
     </div>""", unsafe_allow_html=True)
 
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
@@ -686,70 +686,6 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 client_gpt, client_gemini = get_clients()
-
-# ── Gemini 단독 테스트 ────────────────────────────────────────────────────────
-with st.expander("🧪 Gemini 연결 테스트 (디버그용)", expanded=False):
-    test_q = st.text_input("테스트 질문", value="네이버 같은 포털 사이트 추천해줘?", key="gem_test_q")
-    if st.button("Gemini 직접 호출", key="btn_gem_test"):
-        if not gemini_ok:
-            st.error("Gemini API 키를 먼저 입력하세요.")
-        else:
-            with st.spinner("Gemini 호출 중..."):
-                try:
-                    import google.genai as genai
-                    from google.genai import types as gtypes
-                    _api_key, _model_name = client_gemini
-                    _client = genai.Client(api_key=_api_key)
-
-                    # 사용 가능한 모델 목록 조회
-                    st.markdown("**사용 가능한 모델 목록:**")
-                    try:
-                        _all_models = list(_client.models.list())
-                        _gem_models = [
-                            m.name for m in _all_models
-                            if "gemini" in (m.name or "").lower()
-                            and hasattr(m, "supported_actions")
-                            and "generateContent" in (m.supported_actions or [])
-                        ]
-                        if not _gem_models:
-                            _gem_models = [m.name for m in _all_models if "gemini" in (m.name or "").lower()]
-                        for _mn in _gem_models[:10]:
-                            st.code(_mn)
-                    except Exception as _le:
-                        st.warning(f"모델 목록 조회 실패: {_le}")
-
-                    # 현재 선택 모델로 테스트
-                    st.write(f"선택 모델: `{_model_name}`")
-                    _test_resp = _client.models.generate_content(
-                        model=_model_name,
-                        contents=test_q,
-                        config=gtypes.GenerateContentConfig(
-                            max_output_tokens=300, temperature=0.7)
-                    )
-                    _text = (_test_resp.text or "").strip()
-                    if _text:
-                        st.success("✅ Gemini 응답 성공")
-                        st.code(_text[:500])
-                        # 브랜드 매칭 테스트
-                        from core.citation import build_brand_variants, detect_citation
-                        _url = st.session_state.get("url_input", "")
-                        _brand = st.session_state.get("brand_input", "")
-                        if _url and _brand:
-                            _variants = build_brand_variants(
-                                ("https://"+_url if not _url.startswith("http") else _url),
-                                {"brand_name": _brand}
-                            )
-                            st.write(f"brand_variants: `{_variants}`")
-                            _result = detect_citation(_text, _variants)
-                            from core.ai_client import _check_mention
-                            _cm = _check_mention(_text, _variants)
-                            st.write(f"detect_citation: cited=`{_result.cited}` conf=`{_result.confidence:.2f}`")
-                            st.write(f"_check_mention: `{_cm}`")
-                    else:
-                        st.error("❌ Gemini 응답이 빈 문자열")
-                        st.write("candidates:", _test_resp.candidates if hasattr(_test_resp, "candidates") else "없음")
-                except Exception as e:
-                    st.error(f"❌ 예외 발생: {type(e).__name__}: {e}")
 
 # ── 탭 ───────────────────────────────────────────────────────────────────────
 tab_main, tab_hist = st.tabs(["📊 인용 점유율 분석", "🕘 히스토리"])
@@ -898,19 +834,6 @@ with tab_main:
             st.session_state["cost_tracker"] = tracker
             stat.success(f"시뮬레이션 완료 ({elapsed_sim}초) | ~${tracker.summary()['estimated_usd']:.4f}")
 
-            # ── Gemini 디버그 (0% 원인 파악용) ──
-            with st.expander("🔍 Gemini 디버그 (0% 원인 파악)", expanded=True):
-                for i, _r in enumerate(all_results):
-                    _rd = _r.to_dict() if hasattr(_r, "to_dict") else _r
-                    gem_rate = _rd.get("gemini_rate")
-                    gem_hits = _rd.get("gemini_hits")
-                    gem_samp = _rd.get("gemini_samples", [])
-                    st.markdown(f"**Q{i+1}** gemini_rate={gem_rate} hits={gem_hits}")
-                    if gem_samp:
-                        for s in gem_samp[:2]:
-                            st.code(s[:300], language=None)
-                    else:
-                        st.warning("gemini_samples 없음 → 응답이 빈 문자열이거나 hit이 없음")
 
             # 워크플로우 카드
             n_engines = (1 if client_gpt else 0) + (1 if client_gemini else 0)
@@ -1022,7 +945,7 @@ st.markdown("""
 st.markdown(f"""
 <div style="text-align:center;padding:20px;color:{_text_muted};font-size:.78rem;
     border-top:1px solid {_border};margin-top:20px">
-    AI Citation Analyzer v4.0 &nbsp;·&nbsp;
+    AI Citation Analyzer v4.1 &nbsp;·&nbsp;
     <span style="background:{_accent_gr};-webkit-background-clip:text;
         -webkit-text-fill-color:transparent;font-weight:700">
         Powered by GPT &amp; Gemini
