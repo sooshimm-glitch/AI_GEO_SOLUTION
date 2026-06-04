@@ -158,9 +158,16 @@ def call_gemini(model_obj, prompt, max_tokens=300, temperature=0.7,
         return ""
     logger.warning(f"[GEM] 호출: model={model_name}, prompt_len={len(prompt)}")
     client = genai.Client(api_key=api_key)
+    # gemini-2.5 thinking 모델: thinking 비활성화로 MAX_TOKENS 방지
+    _thinking = None
+    try:
+        _thinking = gtypes.ThinkingConfig(thinking_budget=0)
+    except Exception:
+        pass
     cfg = gtypes.GenerateContentConfig(
-        max_output_tokens=max_tokens,
+        max_output_tokens=max(max_tokens, 2048),  # 최소 2048 보장
         temperature=temperature,
+        thinking_config=_thinking,
     )
 
     last_err = None
