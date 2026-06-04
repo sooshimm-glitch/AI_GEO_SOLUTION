@@ -161,6 +161,21 @@ def build_brand_variants(target_url: str, biz_info: dict) -> list[str]:
             if len(abbrev) >= 2:
                 variants.add(abbrev)
 
+    # ── 6. 도메인 stem 영문 파트를 브랜드 변형으로 추가 ──
+    # progress-roasup → "progress", "roasup" (이미 하이픈 분리로 처리됨)
+    # 브랜드명이 한글이면 도메인 stem 첫 파트를 영문 변형으로 추가
+    if brand_name and re.search(r'[가-힣]', brand_name):
+        if "-" in domain_stem:
+            eng_part = domain_stem.split("-")[0]
+        else:
+            eng_part = domain_stem
+        if len(eng_part) >= 3 and eng_part not in {"www", "the", "my", "get"}:
+            variants.add(eng_part)
+            # "progressroasup" → 도메인 전체도 추가 (하이픈 제거)
+            no_hyphen = domain_stem.replace("-", "")
+            if len(no_hyphen) >= 3:
+                variants.add(no_hyphen)
+
     # ── 필터: 최소 2자, 순수 숫자 제외, 블랙리스트 제외 ──
     return [
         v for v in variants
