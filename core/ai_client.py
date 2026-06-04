@@ -171,8 +171,26 @@ def call_gemini(model_obj, prompt, max_tokens=300, temperature=0.7,
                 contents=prompt,
                 config=cfg,
             )
-            text = (response.text or "").strip()
-            logger.warning(f"[GEM] 응답 수신: len={len(text)}, preview='{text[:80].replace(chr(10),' ')}'")
+            # response.text 실패 시 candidates에서 직접 추출
+            text = ""
+            try:
+                text = (response.text or "").strip()
+            except Exception:
+                pass
+            if not text:
+                try:
+                    for part in response.candidates[0].content.parts:
+                        if hasattr(part, "text") and part.text:
+                            text += part.text
+                    text = text.strip()
+                except Exception:
+                    pass
+            # finish_reason 로깅
+            try:
+                finish = response.candidates[0].finish_reason
+                logger.warning(f"[GEM] 응답 수신: len={len(text)}, finish={finish}, preview='{text[:80].replace(chr(10),' ')}'")
+            except Exception:
+                logger.warning(f"[GEM] 응답 수신: len={len(text)}, preview='{text[:80].replace(chr(10),' ')}'")
             if tracker and response.usage_metadata:
                 um = response.usage_metadata
                 tracker.add_gemini(
