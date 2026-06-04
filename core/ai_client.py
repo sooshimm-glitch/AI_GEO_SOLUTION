@@ -156,7 +156,7 @@ def call_gemini(model_obj, prompt, max_tokens=300, temperature=0.7,
     if not api_key or not model_name:
         logger.warning(f"[GEM] api_key 또는 model_name 비어있음")
         return ""
-    logger.info(f"[GEM] 호출: model={model_name}, prompt_len={len(prompt)}")
+    logger.warning(f"[GEM] 호출: model={model_name}, prompt_len={len(prompt)}")
     client = genai.Client(api_key=api_key)
     cfg = gtypes.GenerateContentConfig(
         max_output_tokens=max_tokens,
@@ -188,9 +188,9 @@ def call_gemini(model_obj, prompt, max_tokens=300, temperature=0.7,
             # finish_reason 로깅
             try:
                 finish = response.candidates[0].finish_reason
-                logger.info(f"[GEM] 응답: len={len(text)}, finish={finish}")
+                logger.warning(f"[GEM] 응답: len={len(text)}, finish={finish}")
             except Exception:
-                logger.info(f"[GEM] 응답: len={len(text)}")
+                logger.warning(f"[GEM] 응답: len={len(text)}")
             if tracker and response.usage_metadata:
                 um = response.usage_metadata
                 tracker.add_gemini(
@@ -397,7 +397,7 @@ def _adaptive_batch(call_fn, question, brand_variants, n,
         # 디버깅: 첫 응답 무조건 WARNING으로 출력 (브랜드 매칭 실패 원인 파악)
         if count_mention and hits == 0 and empty_count == 0:
             _resp_preview = resp[:150].replace('\n', ' ')
-            logger.info(
+            logger.warning(
                 f"[GEM_DEBUG] cited={result.cited}(conf={result.confidence:.2f}) "
                 f"check={check_hit} pat={pat_hit} "
                 f"variants={brand_variants[:3]} "
